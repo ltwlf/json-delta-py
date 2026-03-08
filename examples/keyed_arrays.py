@@ -1,45 +1,45 @@
-"""Key-based array identity — track changes by element ID, not position.
+"""Key-based array identity — track inventory changes by SKU, not position.
 
-Demonstrates how JSON Delta handles arrays where elements have a unique
-identity key (like "id"), producing stable diffs regardless of element order.
+Shows how JSON Delta handles arrays where elements have a stable identity
+key, producing diffs that survive insertions, deletions, and reordering.
 """
+
+import copy
 
 from json_delta import apply_delta, diff_delta, invert_delta
 
-# Source: a product catalog
+# Current product inventory
 source = {
     "products": [
-        {"id": 1, "name": "Widget", "price": 10.00},
-        {"id": 2, "name": "Gadget", "price": 20.00},
-        {"id": 3, "name": "Doohickey", "price": 30.00},
+        {"sku": "LAPTOP-001", "name": "ProBook 14", "price": 999.00, "stock": 45},
+        {"sku": "MOUSE-003", "name": "ErgoClick Pro", "price": 49.99, "stock": 200},
+        {"sku": "MONITOR-002", "name": "UltraWide 34", "price": 599.00, "stock": 30},
     ]
 }
 
-# Target: price update, one removal, one addition
+# Updated inventory: price cut, discontinued monitor, new keyboard
 target = {
     "products": [
-        {"id": 1, "name": "Widget", "price": 12.50},
-        {"id": 2, "name": "Gadget", "price": 20.00},
-        {"id": 4, "name": "Thingamajig", "price": 40.00},
+        {"sku": "LAPTOP-001", "name": "ProBook 14", "price": 899.00, "stock": 45},
+        {"sku": "MOUSE-003", "name": "ErgoClick Pro", "price": 49.99, "stock": 200},
+        {"sku": "KEYBOARD-004", "name": "MechType Ultra", "price": 129.00, "stock": 75},
     ]
 }
 
-# Compute a delta using key-based identity on the "products" array
-delta = diff_delta(source, target, array_keys={"products": "id"})
+# Compute a delta using SKU as the identity key
+delta = diff_delta(source, target, array_keys={"products": "sku"})
 
-print("=== Delta Operations ===")
+print("=== Inventory Changes ===")
 for op in delta["operations"]:
     print(f"  {op['op']:>7s}  {op['path']}")
     if "value" in op:
-        print(f"           value: {op['value']}")
+        print(f"           -> {op['value']}")
 
-# Apply the delta to verify correctness
-import copy
-
+# Forward: apply changes to get the new inventory
 result = apply_delta(copy.deepcopy(source), delta)
 assert result == target, "apply(source, delta) != target"
 
-# Compute and apply the inverse to recover the source
+# Backward: roll back to previous inventory
 inverse = invert_delta(delta)
 recovered = apply_delta(copy.deepcopy(target), inverse)
 assert recovered == source, "apply(target, inverse) != source"

@@ -1,50 +1,56 @@
-"""Audit log — store reversible deltas for a complete change history.
+"""Audit log — complete change history with point-in-time recovery.
 
-Each edit produces a delta with oldValue fields, enabling both
-forward replay and backward reversion of any change.
+Records every edit as a reversible delta with metadata (who, when).
+The full audit trail enables compliance reporting, replay, and revert.
 """
 
 import copy
+from datetime import datetime, timezone
 
 from json_delta import apply_delta, diff_delta, revert_delta
 
 # Initial document
-document = {"title": "Q4 Report", "status": "draft", "author": "Alice"}
+initial = {"title": "Q4 Report", "status": "draft", "author": "Alice"}
+document = copy.deepcopy(initial)
 
-# Simulate a series of edits, capturing each delta
+# Audit log stores every delta with extension metadata
 audit_log: list[dict] = []
 
 
 def edit(doc: dict, new_state: dict, editor: str) -> dict:
-    """Apply an edit and record the delta in the audit log."""
+    """Apply an edit and record the delta with metadata."""
     delta = diff_delta(doc, new_state, reversible=True)
-    # Attach extension metadata (preserved by invert/apply)
     delta["x_editor"] = editor
+    delta["x_timestamp"] = datetime.now(timezone.utc).isoformat()
     audit_log.append(delta)
     return apply_delta(doc, delta)
 
 
-# Edit 1: Alice updates the status
+# Document workflow: draft → review → final
 document = edit(document, {**document, "status": "review"}, "Alice")
-
-# Edit 2: Bob changes the title
 document = edit(document, {**document, "title": "Q4 Financial Report"}, "Bob")
-
-# Edit 3: Alice finalizes
 document = edit(document, {**document, "status": "final", "approved": True}, "Alice")
 
 print("=== Current Document ===")
 print(document)
 
-print("\n=== Audit Log ===")
+print("\n=== Audit Trail ===")
 for i, delta in enumerate(audit_log):
-    editor = delta.get("x_editor", "unknown")
+    editor = delta["x_editor"]
     ops = ", ".join(f"{op['op']} {op['path']}" for op in delta["operations"])
-    print(f"  [{i}] by {editor}: {ops}")
+    print(f"  [{i}] {editor}: {ops}")
 
-# Revert the last change
-print("\n=== Reverting last edit ===")
+# Replay: rebuild the document from scratch using the audit log
+replayed = copy.deepcopy(initial)
+for delta in audit_log:
+    replayed = apply_delta(replayed, delta)
+assert replayed == document, "Replay should reproduce the current document"
+
+# Revert: undo the last edit (e.g., premature finalization)
 document = revert_delta(document, audit_log[-1])
-print(document)
 assert document == {"title": "Q4 Financial Report", "status": "review", "author": "Alice"}
-print("Revert successful!")
+
+print("\n=== After reverting last edit ===")
+print(document)
+
+print("\nAudit log with replay and revert verified!")

@@ -47,21 +47,15 @@ states = [
     },
 ]
 
+# Compute deltas between consecutive states, print and verify each transition
 print("=== State Transition Log ===")
 for i in range(1, len(states)):
-    delta = diff_delta(
-        states[i - 1],
-        states[i],
-        array_keys={"findings": "company"},
-        reversible=False,
-    )
+    delta = diff_delta(states[i - 1], states[i], array_keys={"findings": "company"})
+
     print(f"\nStep {i - 1} -> {i}:")
     for op in delta["operations"]:
         print(f"  {op['op']:>7s}  {op['path']}  =  {op.get('value', '(removed)')}")
 
-# Verify each transition produces the correct next state
-for i in range(1, len(states)):
-    delta = diff_delta(states[i - 1], states[i], array_keys={"findings": "company"})
     result = apply_delta(copy.deepcopy(states[i - 1]), delta)
     assert result == states[i], f"Transition {i - 1}->{i} failed"
 

@@ -1,7 +1,7 @@
-"""Undo/redo stack — use deltas as the foundation for undo/redo.
+"""Undo/redo — reversible configuration editing.
 
-Each user action produces a reversible delta. Undo inverts and applies
-the delta; redo re-applies the original delta.
+A deployment config editor backed by JSON Delta. Each change
+is a reversible delta, enabling multi-step undo and redo.
 """
 
 import copy
@@ -9,61 +9,72 @@ import copy
 from json_delta import apply_delta, diff_delta, invert_delta
 
 
-class UndoRedoStack:
-    def __init__(self, initial_state: dict) -> None:
-        self.state = copy.deepcopy(initial_state)
+class ConfigEditor:
+    """Tracks configuration changes with full undo/redo support."""
+
+    def __init__(self, config: dict) -> None:
+        self.config = copy.deepcopy(config)
         self.undo_stack: list[dict] = []
         self.redo_stack: list[dict] = []
 
-    def apply_change(self, new_state: dict) -> None:
-        """Record a change and clear the redo stack."""
-        delta = diff_delta(self.state, new_state, reversible=True)
+    def update(self, new_config: dict) -> None:
+        """Apply a change and push it onto the undo stack."""
+        delta = diff_delta(self.config, new_config, reversible=True)
         if not delta["operations"]:
-            return  # No change
+            return
         self.undo_stack.append(delta)
         self.redo_stack.clear()
-        self.state = apply_delta(self.state, delta)
+        self.config = apply_delta(self.config, delta)
 
-    def undo(self) -> None:
-        """Undo the last change."""
+    def undo(self) -> bool:
+        """Undo the last change. Returns False if nothing to undo."""
         if not self.undo_stack:
-            print("  Nothing to undo")
-            return
+            return False
         delta = self.undo_stack.pop()
-        inverse = invert_delta(delta)
-        self.state = apply_delta(self.state, inverse)
+        self.config = apply_delta(self.config, invert_delta(delta))
         self.redo_stack.append(delta)
+        return True
 
-    def redo(self) -> None:
-        """Redo the last undone change."""
+    def redo(self) -> bool:
+        """Redo the last undone change. Returns False if nothing to redo."""
         if not self.redo_stack:
-            print("  Nothing to redo")
-            return
+            return False
         delta = self.redo_stack.pop()
-        self.state = apply_delta(self.state, delta)
+        self.config = apply_delta(self.config, delta)
         self.undo_stack.append(delta)
+        return True
 
 
-# Demo
-stack = UndoRedoStack({"name": "Alice", "score": 0})
-print(f"Initial: {stack.state}")
+# Editing a service deployment configuration
+editor = ConfigEditor({
+    "service": "payment-api",
+    "replicas": 2,
+    "env": "staging",
+    "memory": "512Mi",
+})
+print(f"Initial:    {editor.config}")
 
-stack.apply_change({"name": "Alice", "score": 10})
-print(f"After +10: {stack.state}")
+# Change 1: scale up for load test
+editor.update({**editor.config, "replicas": 5, "memory": "1Gi"})
+print(f"Scaled up:  {editor.config}")
 
-stack.apply_change({"name": "Alice", "score": 25})
-print(f"After +15: {stack.state}")
+# Change 2: promote to production
+editor.update({**editor.config, "env": "production"})
+print(f"Promoted:   {editor.config}")
 
-stack.undo()
-print(f"After undo: {stack.state}")
-assert stack.state == {"name": "Alice", "score": 10}
+# Oops — undo the production promotion
+editor.undo()
+print(f"After undo: {editor.config}")
+assert editor.config["env"] == "staging"
 
-stack.undo()
-print(f"After undo: {stack.state}")
-assert stack.state == {"name": "Alice", "score": 0}
+# Undo the scale-up too
+editor.undo()
+print(f"After undo: {editor.config}")
+assert editor.config == {"service": "payment-api", "replicas": 2, "env": "staging", "memory": "512Mi"}
 
-stack.redo()
-print(f"After redo: {stack.state}")
-assert stack.state == {"name": "Alice", "score": 10}
+# Redo the scale-up
+editor.redo()
+print(f"After redo: {editor.config}")
+assert editor.config["replicas"] == 5
 
 print("\nUndo/redo verified!")
