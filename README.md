@@ -17,7 +17,7 @@ json-delta-format  (specification)
     └── json-delta-py     (Python implementation)  ← this package
 ```
 
-The specification defines the wire format. Each language implementation produces and consumes compatible deltas.
+The specification defines the wire format. Each language implementation produces and consumes compatible deltas. A TypeScript implementation is also available: [json-diff-ts](https://github.com/ltwlf/json-diff-ts).
 
 ## Installation
 
