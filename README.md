@@ -1,17 +1,23 @@
 # json-delta-py
 
-Deterministic JSON state transitions for Python.
-Compute, apply, validate, and revert JSON Delta documents with stable array identity and reversible operations.
+[![CI](https://github.com/ltwlf/json-delta-py/actions/workflows/ci.yml/badge.svg)](https://github.com/ltwlf/json-delta-py/actions/workflows/ci.yml)
+[![PyPI version](https://badge.fury.io/py/json-delta-py.svg)](https://pypi.org/project/json-delta-py/)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> **Ecosystem note:** This project implements the JSON Delta specification defined in the [`json-delta-format`](https://github.com/ltwlf/json-delta-format) repository. It is unrelated to the older `json-delta` package published on PyPI.
+**Deterministic JSON state transitions for Python.** Compute, apply, validate, and revert JSON Delta documents with stable array identity and reversible operations. Built for audit logs, undo/redo systems, data synchronization, and agent/workflow state tracking.
+
+Zero dependencies. Fully typed. Python 3.12+.
+
+> **Ecosystem note:** This project implements the [JSON Delta specification](https://github.com/ltwlf/json-delta-format). It is unrelated to the older `json-delta` package on PyPI.
 
 ```text
 json-delta-format  (specification)
     ├── json-diff-ts      (TypeScript implementation)
-    └── json-delta-py     (Python implementation)  <-- this package
+    └── json-delta-py     (Python implementation)  ← this package
 ```
 
-If this project is useful to you, please consider starring the repository.
+The specification defines the wire format. Each language implementation produces and consumes compatible deltas.
 
 ## Installation
 
@@ -30,9 +36,6 @@ target = {"user": {"name": "Alice", "role": "admin"}}
 
 # Compute a delta
 delta = diff_delta(source, target)
-# {'format': 'json-delta', 'version': 1, 'operations': [
-#   {'op': 'replace', 'path': '$.user.role', 'value': 'admin', 'oldValue': 'viewer'}
-# ]}
 
 # Apply it
 result = apply_delta(copy.deepcopy(source), delta)
@@ -43,32 +46,47 @@ recovered = revert_delta(copy.deepcopy(target), delta)
 assert recovered == source
 ```
 
-## Why This Exists
+The delta is a plain JSON-serializable dict you can store in a database, send over HTTP, or consume in any language:
 
-JSON Patch (RFC 6902) uses index-based array paths (`/items/0`). When arrays reorder, insert, or delete concurrently, indices silently point to the wrong elements. JSON Delta solves this:
+```json
+{
+  "format": "json-delta",
+  "version": 1,
+  "operations": [
+    { "op": "replace", "path": "$.user.role", "value": "admin", "oldValue": "viewer" }
+  ]
+}
+```
+
+## What Is JSON Delta
+
+[JSON Delta](https://github.com/ltwlf/json-delta-format) is a format for describing deterministic state transitions between JSON documents. A delta captures the exact set of changes — adds, removes, and replacements — needed to transform a source document into a target. Deltas are plain JSON: they can be applied, stored, transmitted, replayed, and inverted in any language.
+
+## Why JSON Delta Exists
+
+Most JSON diff libraries track array changes by position. Insert one element at the start and every path shifts:
+
+```text
+Remove /items/0  ← was actually "Widget"
+Add    /items/0  ← now it's "NewItem"
+Update /items/1  ← this used to be /items/0
+```
+
+This makes diffs fragile. You can't store them, replay them reliably, or build audit logs on top of them. This is the fundamental problem with index-based formats like JSON Patch (RFC 6902): paths like `/items/0` are positional, so any insertion, deletion, or reorder invalidates every subsequent path.
+
+**JSON Delta solves this with key-based identity.** Array elements are matched by a stable key, and paths use JSONPath filter expressions that survive insertions, deletions, and reordering:
 
 - **Key-based array identity** — paths like `$.items[?(@.id==42)]` stay valid regardless of array order
 - **Built-in reversibility** — `oldValue` fields let you invert any delta without external state
-- **Self-describing paths** — array identity is embedded in the path, no external schema needed
+- **Self-describing** — the `format` field and path expressions make deltas discoverable without external context
 
-This makes JSON Delta a reliable foundation for:
+## What JSON Delta Is Useful For
 
-- **Audit logs** — record exactly what changed, revert any change
-- **Undo/redo** — invert deltas to move backward and forward through history
+- **Audit logs** — record exactly what changed, revert any change on demand
+- **Undo/redo** — invert deltas to move backward and forward through state history
 - **Data synchronization** — send compact deltas instead of full documents
-- **Agent and workflow state** — track state transitions with stable references
-
-## API Reference
-
-| Function | Description |
-| --- | --- |
-| `diff_delta(old, new, *, array_keys=None, reversible=True)` | Compute a delta between two objects |
-| `apply_delta(obj, delta)` | Apply a delta to an object (mutates in place, use return value) |
-| `validate_delta(delta)` | Validate delta structure, returns `ValidationResult` |
-| `invert_delta(delta)` | Compute the inverse of a reversible delta |
-| `revert_delta(obj, delta)` | Revert a delta (shorthand for `apply(obj, invert(delta))`) |
-| `parse_path(path)` | Parse a JSON Delta Path string into typed segments |
-| `build_path(segments)` | Build a canonical path string from segments |
+- **Configuration history** — track config changes with stable references across deployments
+- **Agent and workflow state** — track state transitions in AI agent loops or workflow engines
 
 ## Array Identity Models
 
@@ -95,15 +113,28 @@ delta = diff_delta(old, new)
 # Path: $.items[0].name — positional, fragile across concurrent changes
 ```
 
+## API Reference
+
+| Function | Description |
+| --- | --- |
+| `diff_delta(old, new, *, array_keys=None, reversible=True)` | Compute a delta between two objects |
+| `apply_delta(obj, delta)` | Apply a delta to an object (mutates in place, use return value) |
+| `validate_delta(delta)` | Validate delta structure, returns `ValidationResult` |
+| `invert_delta(delta)` | Compute the inverse of a reversible delta |
+| `revert_delta(obj, delta)` | Revert a delta (shorthand for `apply(obj, invert(delta))`) |
+| `parse_path(path)` | Parse a JSON Delta Path string into typed segments |
+| `build_path(segments)` | Build a canonical path string from segments |
+
 ## JSON Delta vs JSON Patch
 
 | Feature | JSON Delta | JSON Patch (RFC 6902) |
 | --- | --- | --- |
-| Array identity | Key-based, value-based, index-based | Index-based only |
+| Path syntax | JSONPath (`$.items[?(@.id==1)]`) | JSON Pointer (`/items/0`) |
+| Array identity | Key-based — survives reorder | Index-based — breaks on insert/delete |
 | Reversibility | Built-in via `oldValue` | Not supported |
-| Path syntax | JSONPath subset (`$.user.name`) | JSON Pointer (`/user/name`) |
-| Operations | add, remove, replace | add, remove, replace, move, copy, test |
+| Self-describing | `format` field in envelope | No envelope |
 | Extensions | `x_`-prefixed properties preserved | Not supported |
+| Specification | [json-delta-format](https://github.com/ltwlf/json-delta-format) | [RFC 6902](https://tools.ietf.org/html/rfc6902) |
 
 ## Examples
 
