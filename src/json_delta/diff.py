@@ -241,10 +241,16 @@ def _diff_arrays_keyed(
     assert key_property is not None  # guaranteed by resolve_identity for mode="key"
     resolver = identity.resolver
 
+    path_str = build_path(segments)
+
     old_by_key: dict[Any, Any] = {}
     for elem in old:
         key_val = extract_identity(elem, key_property, resolver)
         hashable_key = _make_hashable(key_val)
+        if hashable_key in old_by_key:
+            raise DiffError(
+                f"Duplicate identity '{key_property}=={key_val!r}' in old array at {path_str}"
+            )
         old_by_key[hashable_key] = elem
 
     new_by_key: dict[Any, Any] = {}
@@ -252,6 +258,10 @@ def _diff_arrays_keyed(
     for elem in new:
         key_val = extract_identity(elem, key_property, resolver)
         hashable_key = _make_hashable(key_val)
+        if hashable_key in new_by_key:
+            raise DiffError(
+                f"Duplicate identity '{key_property}=={key_val!r}' in new array at {path_str}"
+            )
         new_by_key[hashable_key] = elem
         new_key_order.append(hashable_key)
 
@@ -332,30 +342,30 @@ def _diff_arrays_value(
     reversible: bool,
     operations: list[Operation],
 ) -> None:
-    """Compare arrays by element value (for primitive arrays)."""
-    # Find removed values (in old but not in new)
-    for old_val in old:
-        found = False
-        for new_val in new:
-            if json_equal(old_val, new_val):
-                found = True
-                break
-        if not found:
-            filter_seg = ValueFilterSegment(value=old_val)
-            child_segments = [*segments, filter_seg]
-            _emit_remove(old_val, child_segments, reversible, operations)
+    """Compare arrays by element value (for primitive arrays).
 
-    # Find added values (in new but not in old)
+    Uses multiset semantics: each old value can only match one new value,
+    so duplicates are tracked correctly.
+    """
+    # Track which old elements have been matched
+    old_matched = [False] * len(old)
+
+    # Match new values against old values
     for new_val in new:
-        found = False
-        for old_val in old:
-            if json_equal(old_val, new_val):
-                found = True
-                break
-        if not found:
+        match_idx = _find_unmatched(new_val, old, old_matched)
+        if match_idx is not None:
+            old_matched[match_idx] = True
+        else:
             filter_seg = ValueFilterSegment(value=new_val)
             child_segments = [*segments, filter_seg]
             _emit_add(new_val, child_segments, operations)
+
+    # Unmatched old values are removed
+    for i, old_val in enumerate(old):
+        if not old_matched[i]:
+            filter_seg = ValueFilterSegment(value=old_val)
+            child_segments = [*segments, filter_seg]
+            _emit_remove(old_val, child_segments, reversible, operations)
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +415,21 @@ def _emit_remove(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _find_unmatched(
+    target: Any,
+    candidates: list[Any],
+    matched: list[bool],
+) -> int | None:
+    """Find the first unmatched candidate that equals *target*.
+
+    Returns the index into *candidates*, or ``None`` if no match.
+    """
+    for i, candidate in enumerate(candidates):
+        if not matched[i] and json_equal(target, candidate):
+            return i
+    return None
 
 
 def _should_exclude_path(prop_path: list[str], key: str, exclude_paths: frozenset[str]) -> bool:

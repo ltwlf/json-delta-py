@@ -21,13 +21,22 @@ class IdentityResolver:
     The ``property`` name appears in filter paths: ``[?(@.{property}==...)]``.
     The ``resolve`` callable extracts the identity value from an element.
 
+    .. important::
+
+        The value returned by ``resolve`` **must** match the value actually
+        stored under ``elem[property]`` for that element.  JSON Delta applies
+        keyed-array filters by testing ``elem[property] == literal``, so if
+        the resolver returns a synthetic or composite value that is not
+        literally stored on the element, the generated delta paths will not
+        match during ``apply_delta`` / ``resolve_path``.
+
     Example::
 
-        # Composite key: combine type + region into a single identity
-        IdentityResolver("type", lambda e: f"{e['type']}-{e['region']}")
+        # Simple key: use the ``id`` field directly
+        IdentityResolver("id", lambda e: e["id"])
 
-        # Computed identity from nested structure
-        IdentityResolver("id", lambda e: e["meta"]["uuid"])
+        # Normalized identity: ensure ids are always strings
+        IdentityResolver("id", lambda e: str(e["id"]))
     """
 
     property: str
@@ -121,10 +130,28 @@ def extract_identity(
     """Extract the identity value from an array element.
 
     Uses the custom resolver if provided, otherwise reads the key property
-    directly from the element dict.
+    directly from the element dict.  The returned value must be a JSON scalar
+    (str, int, float, bool, or None) suitable for use in filter paths.
+
+    Raises:
+        DiffError: If the element is missing the key property or the resolver
+            raises an exception or returns a non-scalar value.
     """
     if resolver is not None:
-        return resolver(elem)
-    if not isinstance(elem, dict) or key_property not in elem:
+        try:
+            value = resolver(elem)
+        except Exception as exc:
+            raise DiffError(
+                f"Identity resolver for '{key_property}' failed on element {elem!r}: {exc}"
+            ) from exc
+    elif not isinstance(elem, dict) or key_property not in elem:
         raise DiffError(f"Array element missing identity key '{key_property}': {elem!r}")
-    return elem[key_property]
+    else:
+        value = elem[key_property]
+
+    if not isinstance(value, (str, int, float, bool, type(None))):
+        raise DiffError(
+            f"Identity value for '{key_property}' must be a JSON scalar, "
+            f"got {type(value).__name__}: {value!r}"
+        )
+    return value

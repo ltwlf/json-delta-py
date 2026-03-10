@@ -514,11 +514,14 @@ class TestCallableIdentityKeys:
         delta = diff_delta(
             old, new,
             array_identity_keys={
-                "items": IdentityResolver("type", lambda e: f"{e['type']}-{e['region']}"),
+                "items": IdentityResolver("type", lambda e: e["type"]),
             },
         )
         assert len(delta.operations) == 1
-        assert "type=='A-US'" in delta.operations[0].path
+        assert "type=='A'" in delta.operations[0].path
+        # Round-trip: delta can be applied
+        result = apply_delta(deep_clone(old), delta)
+        assert result == new
 
     def test_callable_add_element(self) -> None:
         """Adding an element with callable identity key."""
@@ -543,17 +546,20 @@ class TestCallableIdentityKeys:
         assert len(remove_ops) == 1
 
     def test_callable_composite_key(self) -> None:
-        """Callable can compute composite identity from multiple fields."""
+        """Callable uses actual property value for identity matching."""
         old = {"events": [{"type": "click", "target": "btn", "count": 5}]}
         new = {"events": [{"type": "click", "target": "btn", "count": 10}]}
         delta = diff_delta(
             old, new,
             array_identity_keys={
-                "events": ("type", lambda e: f"{e['type']}:{e['target']}"),
+                "events": ("type", lambda e: e["type"]),
             },
         )
         assert len(delta.operations) == 1
-        assert "type=='click:btn'" in delta.operations[0].path
+        assert "type=='click'" in delta.operations[0].path
+        # Round-trip: delta can be applied
+        result = apply_delta(deep_clone(old), delta)
+        assert result == new
 
     def test_callable_roundtrip(self) -> None:
         """Callable identity keys produce valid deltas that round-trip."""
@@ -565,6 +571,28 @@ class TestCallableIdentityKeys:
         )
         result = apply_delta(deep_clone(old), delta)
         assert result == new
+
+    def test_resolver_error_wrapped(self) -> None:
+        """Resolver exceptions are wrapped in DiffError with context."""
+        import pytest
+        from json_delta.errors import DiffError
+        with pytest.raises(DiffError, match="Identity resolver.*failed"):
+            diff_delta(
+                {"items": [{"id": 1, "v": "a"}]},
+                {"items": [{"id": 1, "v": "b"}]},
+                array_identity_keys={"items": ("id", lambda e: e["missing_key"])},
+            )
+
+    def test_resolver_non_scalar_rejected(self) -> None:
+        """Resolver returning a non-scalar value raises DiffError."""
+        import pytest
+        from json_delta.errors import DiffError
+        with pytest.raises(DiffError, match="must be a JSON scalar"):
+            diff_delta(
+                {"items": [{"id": 1, "v": "a"}]},
+                {"items": [{"id": 1, "v": "b"}]},
+                array_identity_keys={"items": ("id", lambda e: {"composite": True})},
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -666,3 +694,68 @@ class TestDiffConformance:
         inverse = invert_delta(delta)
         recovered = apply_delta(deep_clone(target), inverse)
         assert recovered == source
+
+
+# ---------------------------------------------------------------------------
+# Duplicate identity detection
+# ---------------------------------------------------------------------------
+
+
+class TestDuplicateIdentity:
+    def test_duplicate_in_old_raises(self) -> None:
+        """Duplicate identity keys in old array raise DiffError."""
+        import pytest
+        from json_delta.errors import DiffError
+        with pytest.raises(DiffError, match="Duplicate identity"):
+            diff_delta(
+                {"items": [{"id": 1, "v": "a"}, {"id": 1, "v": "b"}]},
+                {"items": [{"id": 1, "v": "a"}]},
+                array_identity_keys={"items": "id"},
+            )
+
+    def test_duplicate_in_new_raises(self) -> None:
+        """Duplicate identity keys in new array raise DiffError."""
+        import pytest
+        from json_delta.errors import DiffError
+        with pytest.raises(DiffError, match="Duplicate identity"):
+            diff_delta(
+                {"items": [{"id": 1, "v": "a"}]},
+                {"items": [{"id": 1, "v": "a"}, {"id": 1, "v": "b"}]},
+                array_identity_keys={"items": "id"},
+            )
+
+
+# ---------------------------------------------------------------------------
+# Value-based multiset semantics
+# ---------------------------------------------------------------------------
+
+
+class TestValueMultiset:
+    def test_duplicate_value_add(self) -> None:
+        """Adding a duplicate value emits an add operation."""
+        delta = diff_delta(
+            {"tags": ["a"]},
+            {"tags": ["a", "a"]},
+            array_identity_keys={"tags": "$value"},
+        )
+        add_ops = [op for op in delta.operations if op.op == "add"]
+        assert len(add_ops) == 1
+
+    def test_duplicate_value_remove(self) -> None:
+        """Removing one of two duplicate values emits a remove operation."""
+        delta = diff_delta(
+            {"tags": ["a", "a"]},
+            {"tags": ["a"]},
+            array_identity_keys={"tags": "$value"},
+        )
+        remove_ops = [op for op in delta.operations if op.op == "remove"]
+        assert len(remove_ops) == 1
+
+    def test_all_duplicates_unchanged(self) -> None:
+        """Identical duplicate arrays produce no operations."""
+        delta = diff_delta(
+            {"tags": ["a", "a"]},
+            {"tags": ["a", "a"]},
+            array_identity_keys={"tags": "$value"},
+        )
+        assert len(delta.operations) == 0

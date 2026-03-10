@@ -18,6 +18,7 @@ from json_delta._identity import (
     resolve_identity,
 )
 from json_delta._utils import json_equal
+from json_delta.errors import DiffError
 from json_delta.models import ChangeType, ComparisonNode
 
 
@@ -133,9 +134,9 @@ def _compare_objects(
             continue
 
         if key in old and key not in new:
-            children[key] = ComparisonNode(type=ChangeType.REMOVED, old_value=old[key])
+            children[key] = _enrich_removed(old[key])
         elif key not in old and key in new:
-            children[key] = ComparisonNode(type=ChangeType.ADDED, value=new[key])
+            children[key] = _enrich_added(new[key])
         else:
             children[key] = _compare_values(
                 old[key], new[key], [*prop_path, key], identity_keys, exclude, exclude_paths,
@@ -184,9 +185,9 @@ def _compare_arrays_index(
         if i < len(old) and i < len(new):
             children.append(_compare_values(old[i], new[i], prop_path, identity_keys, exclude, exclude_paths))
         elif i >= len(old):
-            children.append(ComparisonNode(type=ChangeType.ADDED, value=new[i]))
+            children.append(_enrich_added(new[i]))
         else:
-            children.append(ComparisonNode(type=ChangeType.REMOVED, old_value=old[i]))
+            children.append(_enrich_removed(old[i]))
 
     return ComparisonNode(type=ChangeType.CONTAINER, value=children)
 
@@ -207,12 +208,16 @@ def _compare_arrays_keyed(
         raise ValueError(msg)
     resolver = identity.resolver
 
-    # Build lookup maps preserving order
+    # Build lookup maps preserving order; detect duplicates
     old_by_key: dict[Any, Any] = {}
     old_order: list[Any] = []
     for elem in old:
         key_val = extract_identity(elem, key_property, resolver)
         hashable_key = _make_hashable(key_val)
+        if hashable_key in old_by_key:
+            raise DiffError(
+                f"Duplicate identity '{key_property}=={key_val!r}' in old array"
+            )
         old_by_key[hashable_key] = elem
         old_order.append(hashable_key)
 
@@ -221,6 +226,10 @@ def _compare_arrays_keyed(
     for elem in new:
         key_val = extract_identity(elem, key_property, resolver)
         hashable_key = _make_hashable(key_val)
+        if hashable_key in new_by_key:
+            raise DiffError(
+                f"Duplicate identity '{key_property}=={key_val!r}' in new array"
+            )
         new_by_key[hashable_key] = elem
         new_order.append(hashable_key)
 
@@ -235,12 +244,12 @@ def _compare_arrays_keyed(
                                 prop_path, identity_keys, exclude, exclude_paths)
             )
         else:
-            children.append(ComparisonNode(type=ChangeType.ADDED, value=new_by_key[hashable_key]))
+            children.append(_enrich_added(new_by_key[hashable_key]))
 
     # Items removed (in old but not in new)
     for hashable_key in old_order:
         if hashable_key not in new_by_key:
-            children.append(ComparisonNode(type=ChangeType.REMOVED, old_value=old_by_key[hashable_key]))
+            children.append(_enrich_removed(old_by_key[hashable_key]))
 
     return ComparisonNode(type=ChangeType.CONTAINER, value=children)
 
@@ -252,19 +261,22 @@ def _compare_arrays_value(
     """Compare arrays by value identity (for primitive arrays)."""
     children: list[ComparisonNode] = []
 
-    # Matched values (in both)
+    # Track matched counts for correct multiset semantics.
+    # Without this, old=["a"] new=["a","a"] would wrongly match both.
+    old_matched = [False] * len(old)
+
     for new_val in new:
-        found = any(json_equal(new_val, old_val) for old_val in old)
-        if found:
+        match_idx = _find_unmatched(new_val, old, old_matched)
+        if match_idx is not None:
+            old_matched[match_idx] = True
             children.append(ComparisonNode(type=ChangeType.UNCHANGED, value=new_val))
         else:
-            children.append(ComparisonNode(type=ChangeType.ADDED, value=new_val))
+            children.append(_enrich_added(new_val))
 
-    # Removed values (in old but not in new)
-    for old_val in old:
-        found = any(json_equal(old_val, new_val) for new_val in new)
-        if not found:
-            children.append(ComparisonNode(type=ChangeType.REMOVED, old_value=old_val))
+    # Unmatched old values are removed
+    for i, old_val in enumerate(old):
+        if not old_matched[i]:
+            children.append(_enrich_removed(old_val))
 
     return ComparisonNode(type=ChangeType.CONTAINER, value=children)
 
@@ -272,6 +284,51 @@ def _compare_arrays_value(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _find_unmatched(
+    target: Any,
+    candidates: list[Any],
+    matched: list[bool],
+) -> int | None:
+    """Find the first unmatched candidate that equals *target*.
+
+    Returns the index into *candidates*, or ``None`` if no match.
+    """
+    for i, candidate in enumerate(candidates):
+        if not matched[i] and json_equal(target, candidate):
+            return i
+    return None
+
+
+def _enrich_added(value: Any) -> ComparisonNode:
+    """Wrap an added value as a ComparisonNode tree.
+
+    Containers become ``CONTAINER`` nodes with all descendants marked ``ADDED``.
+    Scalars become ``ADDED`` leaf nodes.
+    """
+    if isinstance(value, dict) and not isinstance(value, bool):
+        children = {k: _enrich_added(v) for k, v in value.items()}
+        return ComparisonNode(type=ChangeType.CONTAINER, value=children)
+    if isinstance(value, list):
+        children_list = [_enrich_added(v) for v in value]
+        return ComparisonNode(type=ChangeType.CONTAINER, value=children_list)
+    return ComparisonNode(type=ChangeType.ADDED, value=value)
+
+
+def _enrich_removed(value: Any) -> ComparisonNode:
+    """Wrap a removed value as a ComparisonNode tree.
+
+    Containers become ``CONTAINER`` nodes with all descendants marked ``REMOVED``.
+    Scalars become ``REMOVED`` leaf nodes.
+    """
+    if isinstance(value, dict) and not isinstance(value, bool):
+        children = {k: _enrich_removed(v) for k, v in value.items()}
+        return ComparisonNode(type=ChangeType.CONTAINER, value=children)
+    if isinstance(value, list):
+        children_list = [_enrich_removed(v) for v in value]
+        return ComparisonNode(type=ChangeType.CONTAINER, value=children_list)
+    return ComparisonNode(type=ChangeType.REMOVED, old_value=value)
 
 
 def _should_exclude_path(prop_path: list[str], key: str, exclude_paths: frozenset[str]) -> bool:

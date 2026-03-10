@@ -222,7 +222,12 @@ class TestArraysKeyed:
         items = node.value["items"]
         assert len(items.value) == 2
         assert items.value[0].type == ChangeType.CONTAINER  # unchanged match
-        assert items.value[1].type == ChangeType.ADDED
+        # Added dict is wrapped as CONTAINER with ADDED leaf children
+        added = items.value[1]
+        assert added.type == ChangeType.CONTAINER
+        assert added.value["id"].type == ChangeType.ADDED
+        assert added.value["name"].type == ChangeType.ADDED
+        assert added.value["name"].value == "Gadget"
 
     def test_keyed_remove(self) -> None:
         old = {"items": [{"id": 1, "name": "Widget"}, {"id": 2, "name": "Gadget"}]}
@@ -231,7 +236,12 @@ class TestArraysKeyed:
         items = node.value["items"]
         assert len(items.value) == 2
         assert items.value[0].type == ChangeType.CONTAINER  # matched
-        assert items.value[1].type == ChangeType.REMOVED
+        # Removed dict is wrapped as CONTAINER with REMOVED leaf children
+        removed = items.value[1]
+        assert removed.type == ChangeType.CONTAINER
+        assert removed.value["id"].type == ChangeType.REMOVED
+        assert removed.value["name"].type == ChangeType.REMOVED
+        assert removed.value["name"].old_value == "Gadget"
 
     def test_keyed_with_callable(self) -> None:
         old = {"items": [{"sku": "A", "val": 1}]}
@@ -381,6 +391,101 @@ class TestEmptyContainers:
         node = compare([1, 2], [])
         assert len(node.value) == 2
         assert all(c.type == ChangeType.REMOVED for c in node.value)
+
+
+class TestEnrichedAddRemove:
+    """ADDED/REMOVED container values are recursively wrapped as CONTAINER nodes."""
+
+    def test_added_object_is_enriched(self) -> None:
+        node = compare({}, {"user": {"name": "Alice", "age": 30}})
+        user = node.value["user"]
+        assert user.type == ChangeType.CONTAINER
+        assert user.value["name"].type == ChangeType.ADDED
+        assert user.value["name"].value == "Alice"
+        assert user.value["age"].type == ChangeType.ADDED
+
+    def test_removed_object_is_enriched(self) -> None:
+        node = compare({"user": {"name": "Alice"}}, {})
+        user = node.value["user"]
+        assert user.type == ChangeType.CONTAINER
+        assert user.value["name"].type == ChangeType.REMOVED
+        assert user.value["name"].old_value == "Alice"
+
+    def test_added_array_is_enriched(self) -> None:
+        node = compare({}, {"tags": ["a", "b"]})
+        tags = node.value["tags"]
+        assert tags.type == ChangeType.CONTAINER
+        assert len(tags.value) == 2
+        assert all(c.type == ChangeType.ADDED for c in tags.value)
+
+    def test_removed_nested_structure(self) -> None:
+        old = {"data": {"items": [{"id": 1}]}}
+        node = compare(old, {})
+        data = node.value["data"]
+        assert data.type == ChangeType.CONTAINER
+        items = data.value["items"]
+        assert items.type == ChangeType.CONTAINER
+        assert items.value[0].type == ChangeType.CONTAINER
+        assert items.value[0].value["id"].type == ChangeType.REMOVED
+
+
+class TestDuplicateIdentity:
+    """Duplicate identity keys in keyed arrays raise DiffError."""
+
+    def test_duplicate_in_old_array(self) -> None:
+        import pytest
+        from json_delta.errors import DiffError
+        with pytest.raises(DiffError, match="Duplicate identity"):
+            compare(
+                {"items": [{"id": 1, "v": "a"}, {"id": 1, "v": "b"}]},
+                {"items": [{"id": 1, "v": "a"}]},
+                array_identity_keys={"items": "id"},
+            )
+
+    def test_duplicate_in_new_array(self) -> None:
+        import pytest
+        from json_delta.errors import DiffError
+        with pytest.raises(DiffError, match="Duplicate identity"):
+            compare(
+                {"items": [{"id": 1, "v": "a"}]},
+                {"items": [{"id": 1, "v": "a"}, {"id": 1, "v": "b"}]},
+                array_identity_keys={"items": "id"},
+            )
+
+
+class TestValueMultiset:
+    """Value-based comparison uses multiset semantics for duplicates."""
+
+    def test_duplicate_add(self) -> None:
+        node = compare(
+            {"tags": ["a"]},
+            {"tags": ["a", "a"]},
+            array_identity_keys={"tags": "$value"},
+        )
+        tags = node.value["tags"]
+        types = [c.type for c in tags.value]
+        assert types.count(ChangeType.UNCHANGED) == 1
+        assert types.count(ChangeType.ADDED) == 1
+
+    def test_duplicate_remove(self) -> None:
+        node = compare(
+            {"tags": ["a", "a"]},
+            {"tags": ["a"]},
+            array_identity_keys={"tags": "$value"},
+        )
+        tags = node.value["tags"]
+        types = [c.type for c in tags.value]
+        assert types.count(ChangeType.UNCHANGED) == 1
+        assert types.count(ChangeType.REMOVED) == 1
+
+    def test_all_duplicates_unchanged(self) -> None:
+        node = compare(
+            {"tags": ["a", "a"]},
+            {"tags": ["a", "a"]},
+            array_identity_keys={"tags": "$value"},
+        )
+        tags = node.value["tags"]
+        assert all(c.type == ChangeType.UNCHANGED for c in tags.value)
 
 
 class TestComparisonNodeProperties:
