@@ -587,7 +587,7 @@ class TestCallableIdentityKeys:
         """Resolver returning a non-scalar value raises DiffError."""
         import pytest
         from json_delta.errors import DiffError
-        with pytest.raises(DiffError, match="must be a JSON scalar"):
+        with pytest.raises(DiffError, match="filter path would not match"):
             diff_delta(
                 {"items": [{"id": 1, "v": "a"}]},
                 {"items": [{"id": 1, "v": "b"}]},

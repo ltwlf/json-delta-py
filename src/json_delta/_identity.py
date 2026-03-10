@@ -12,6 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from json_delta._utils import json_equal
 from json_delta.errors import DiffError
 
 
@@ -146,6 +147,21 @@ def extract_identity(
             raise DiffError(
                 f"Identity resolver for '{key_property}' failed on element {elem!r}: {exc}"
             ) from exc
+        # Verify the element is a dict with the key property and that the
+        # stored value matches the resolved value — apply_delta matches
+        # filter paths via elem[key_property] == literal, so a mismatch
+        # would produce unapplyable deltas.
+        if not isinstance(elem, dict) or key_property not in elem:
+            raise DiffError(
+                f"Resolver for '{key_property}' returned {value!r} but element "
+                f"is not a dict with '{key_property}': {elem!r}"
+            )
+        stored = elem[key_property]
+        if not json_equal(stored, value):
+            raise DiffError(
+                f"Resolver for '{key_property}' returned {value!r} but "
+                f"elem['{key_property}'] is {stored!r} — filter path would not match"
+            )
     elif not isinstance(elem, dict) or key_property not in elem:
         raise DiffError(f"Array element missing identity key '{key_property}': {elem!r}")
     else:

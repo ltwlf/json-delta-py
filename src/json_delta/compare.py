@@ -86,7 +86,9 @@ def _compare_values(
 ) -> ComparisonNode:
     """Recursively compare two values and produce a ComparisonNode."""
     if json_equal(old, new):
-        return _enrich_unchanged(old, prop_path, exclude, exclude_paths)
+        # Enrich from `new` so the tree reflects the target document's
+        # structure/values (e.g. 1.0 vs 1, dict insertion order).
+        return _enrich_unchanged(new, prop_path, exclude, exclude_paths)
 
     old_is_dict = isinstance(old, dict) and not isinstance(old, bool)
     new_is_dict = isinstance(new, dict) and not isinstance(new, bool)
