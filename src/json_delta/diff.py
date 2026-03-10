@@ -29,6 +29,7 @@ def diff_delta(
     new_obj: Any,
     *,
     array_keys: dict[str, str] | None = None,
+    exclude_keys: set[str] | None = None,
     reversible: bool = True,
 ) -> Delta:
     """Compute a JSON Delta between two objects.
@@ -40,6 +41,9 @@ def diff_delta(
             - A string key name (e.g., ``"id"``) → key-based identity.
             - ``"$value"`` → value-based identity.
             - ``"$index"`` → index-based identity (also the default).
+        exclude_keys: Property names to skip during comparison at any depth.
+            Matching keys are invisible to the diff engine — they produce no
+            operations regardless of whether they differ, are added, or removed.
         reversible: If True (default), include ``oldValue`` on replace/remove.
 
     Returns:
@@ -51,8 +55,9 @@ def diff_delta(
     _validate_json_value(old_obj, "old_obj")
     _validate_json_value(new_obj, "new_obj")
 
+    _exclude: frozenset[str] = frozenset(exclude_keys) if exclude_keys else frozenset()
     operations: list[Operation] = []
-    _diff_values(old_obj, new_obj, [], [], array_keys or {}, reversible, operations)
+    _diff_values(old_obj, new_obj, [], [], array_keys or {}, _exclude, reversible, operations)
 
     return Delta({
         "format": "json-delta",
@@ -72,6 +77,7 @@ def _diff_values(
     segments: list[_Segment],
     prop_path: list[str],
     array_keys: dict[str, str],
+    exclude: frozenset[str],
     reversible: bool,
     operations: list[Operation],
 ) -> None:
@@ -86,9 +92,9 @@ def _diff_values(
     new_is_list = isinstance(new, list)
 
     if old_is_dict and new_is_dict:
-        _diff_objects(old, new, segments, prop_path, array_keys, reversible, operations)
+        _diff_objects(old, new, segments, prop_path, array_keys, exclude, reversible, operations)
     elif old_is_list and new_is_list:
-        _diff_arrays(old, new, segments, prop_path, array_keys, reversible, operations)
+        _diff_arrays(old, new, segments, prop_path, array_keys, exclude, reversible, operations)
     else:
         # Type change or scalar difference → single replace
         _emit_replace(old, new, segments, reversible, operations)
@@ -100,11 +106,12 @@ def _diff_objects(
     segments: list[_Segment],
     prop_path: list[str],
     array_keys: dict[str, str],
+    exclude: frozenset[str],
     reversible: bool,
     operations: list[Operation],
 ) -> None:
     """Compare two objects and emit add/remove/replace operations."""
-    all_keys = sorted(set(old.keys()) | set(new.keys()))
+    all_keys = sorted((set(old.keys()) | set(new.keys())) - exclude)
 
     for key in all_keys:
         seg = PropertySegment(name=key)
@@ -116,7 +123,7 @@ def _diff_objects(
         elif key not in old and key in new:
             _emit_add(new[key], child_segments, operations)
         else:
-            _diff_values(old[key], new[key], child_segments, child_prop_path, array_keys, reversible, operations)
+            _diff_values(old[key], new[key], child_segments, child_prop_path, array_keys, exclude, reversible, operations)
 
 
 def _diff_arrays(
@@ -125,6 +132,7 @@ def _diff_arrays(
     segments: list[_Segment],
     prop_path: list[str],
     array_keys: dict[str, str],
+    exclude: frozenset[str],
     reversible: bool,
     operations: list[Operation],
 ) -> None:
@@ -133,11 +141,11 @@ def _diff_arrays(
     identity = array_keys.get(path_key, "$index")
 
     if identity == "$index":
-        _diff_arrays_index(old, new, segments, prop_path, array_keys, reversible, operations)
+        _diff_arrays_index(old, new, segments, prop_path, array_keys, exclude, reversible, operations)
     elif identity == "$value":
         _diff_arrays_value(old, new, segments, reversible, operations)
     else:
-        _diff_arrays_keyed(old, new, segments, prop_path, array_keys, identity, reversible, operations)
+        _diff_arrays_keyed(old, new, segments, prop_path, array_keys, identity, exclude, reversible, operations)
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +159,7 @@ def _diff_arrays_index(
     segments: list[_Segment],
     prop_path: list[str],
     array_keys: dict[str, str],
+    exclude: frozenset[str],
     reversible: bool,
     operations: list[Operation],
 ) -> None:
@@ -161,7 +170,7 @@ def _diff_arrays_index(
     for i in range(min_len):
         seg = IndexSegment(index=i)
         child_segments = [*segments, seg]
-        _diff_values(old[i], new[i], child_segments, prop_path, array_keys, reversible, operations)
+        _diff_values(old[i], new[i], child_segments, prop_path, array_keys, exclude, reversible, operations)
 
     # Elements removed from the end (remove from highest index first)
     for i in range(len(old) - 1, min_len - 1, -1):
@@ -188,6 +197,7 @@ def _diff_arrays_keyed(
     prop_path: list[str],
     array_keys: dict[str, str],
     identity_key: str,
+    exclude: frozenset[str],
     reversible: bool,
     operations: list[Operation],
 ) -> None:
@@ -228,7 +238,7 @@ def _diff_arrays_keyed(
                 filter_seg = KeyFilterSegment(property=identity_key, value=key_val)
                 # Recurse into properties of the matched element
                 _diff_keyed_element(
-                    old_elem, new_elem, [*segments, filter_seg], prop_path, array_keys, reversible, operations
+                    old_elem, new_elem, [*segments, filter_seg], prop_path, array_keys, exclude, reversible, operations
                 )
 
     # Added elements (in new but not in old)
@@ -247,11 +257,12 @@ def _diff_keyed_element(
     segments: list[_Segment],
     prop_path: list[str],
     array_keys: dict[str, str],
+    exclude: frozenset[str],
     reversible: bool,
     operations: list[Operation],
 ) -> None:
     """Diff two keyed-array elements, emitting property-level operations."""
-    all_keys = sorted(set(old_elem.keys()) | set(new_elem.keys()))
+    all_keys = sorted((set(old_elem.keys()) | set(new_elem.keys())) - exclude)
 
     for key in all_keys:
         seg = PropertySegment(name=key)
@@ -264,7 +275,7 @@ def _diff_keyed_element(
             _emit_add(new_elem[key], child_segments, operations)
         else:
             _diff_values(
-                old_elem[key], new_elem[key], child_segments, child_prop_path, array_keys, reversible, operations
+                old_elem[key], new_elem[key], child_segments, child_prop_path, array_keys, exclude, reversible, operations
             )
 
 

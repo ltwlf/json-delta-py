@@ -347,6 +347,91 @@ class TestDiffErrors:
 
 
 # ---------------------------------------------------------------------------
+# Exclude keys
+# ---------------------------------------------------------------------------
+
+
+class TestExcludeKeys:
+    def test_excluded_top_level_key_no_ops(self) -> None:
+        """Excluded keys produce zero operations even when values differ."""
+        old = {"name": "Alice", "metadata": {"updated": "2025-01-01"}}
+        new = {"name": "Alice", "metadata": {"updated": "2026-03-10"}}
+        delta = diff_delta(old, new, exclude_keys={"metadata"})
+        assert delta["operations"] == []
+
+    def test_non_excluded_keys_still_diff(self) -> None:
+        """Non-excluded keys diff normally when exclude_keys is set."""
+        old = {"name": "Alice", "metadata": "old"}
+        new = {"name": "Bob", "metadata": "new"}
+        delta = diff_delta(old, new, exclude_keys={"metadata"})
+        assert len(delta["operations"]) == 1
+        assert delta["operations"][0]["path"] == "$.name"
+        assert delta["operations"][0]["value"] == "Bob"
+
+    def test_excluded_key_added_no_ops(self) -> None:
+        """Adding an excluded key produces no add operation."""
+        old = {"name": "Alice"}
+        new = {"name": "Alice", "_internal": True}
+        delta = diff_delta(old, new, exclude_keys={"_internal"})
+        assert delta["operations"] == []
+
+    def test_excluded_key_removed_no_ops(self) -> None:
+        """Removing an excluded key produces no remove operation."""
+        old = {"name": "Alice", "_internal": True}
+        new = {"name": "Alice"}
+        delta = diff_delta(old, new, exclude_keys={"_internal"})
+        assert delta["operations"] == []
+
+    def test_exclude_inside_keyed_array_elements(self) -> None:
+        """Exclusion works at any depth, including inside keyed array elements."""
+        old = {"items": [{"id": 1, "name": "Widget", "metadata": {"v": 1}}]}
+        new = {"items": [{"id": 1, "name": "Widget", "metadata": {"v": 2}}]}
+        delta = diff_delta(old, new, array_keys={"items": "id"}, exclude_keys={"metadata"})
+        assert delta["operations"] == []
+
+    def test_exclude_nested_property(self) -> None:
+        """Exclusion applies at any depth in nested objects."""
+        old = {"a": {"b": {"skip_me": 1, "keep": "old"}}}
+        new = {"a": {"b": {"skip_me": 999, "keep": "new"}}}
+        delta = diff_delta(old, new, exclude_keys={"skip_me"})
+        assert len(delta["operations"]) == 1
+        assert delta["operations"][0]["path"] == "$.a.b.keep"
+
+    def test_empty_exclude_keys_same_as_none(self) -> None:
+        """Empty set behaves identically to None."""
+        old = {"name": "Alice"}
+        new = {"name": "Bob"}
+        delta_none = diff_delta(old, new, exclude_keys=None)
+        delta_empty = diff_delta(old, new, exclude_keys=set())
+        assert len(delta_none["operations"]) == len(delta_empty["operations"])
+        assert delta_none["operations"][0]["path"] == delta_empty["operations"][0]["path"]
+
+    def test_dotted_key_treated_as_literal_name(self) -> None:
+        """Keys with dots are treated as literal property names, not paths."""
+        old = {"a.b": 1, "c": 2}
+        new = {"a.b": 99, "c": 3}
+        delta = diff_delta(old, new, exclude_keys={"a.b"})
+        assert len(delta["operations"]) == 1
+        assert delta["operations"][0]["path"] == "$.c"
+
+    def test_multiple_excluded_keys(self) -> None:
+        """Multiple keys can be excluded simultaneously."""
+        old = {"name": "Alice", "etag": "abc", "updated_at": "2025", "age": 30}
+        new = {"name": "Bob", "etag": "def", "updated_at": "2026", "age": 31}
+        delta = diff_delta(old, new, exclude_keys={"etag", "updated_at"})
+        paths = {op["path"] for op in delta["operations"]}
+        assert paths == {"$.name", "$.age"}
+
+    def test_exclude_combined_with_reversible(self) -> None:
+        """exclude_keys works correctly with reversible=False."""
+        old = {"name": "Alice", "meta": "x"}
+        new = {"name": "Bob", "meta": "y"}
+        delta = diff_delta(old, new, exclude_keys={"meta"}, reversible=False)
+        assert len(delta["operations"]) == 1
+        assert "oldValue" not in delta["operations"][0]
+
+
+# ---------------------------------------------------------------------------
 # Conformance: apply(source, diff(source, target)) == target
 # ---------------------------------------------------------------------------
 
