@@ -1,6 +1,9 @@
 """Internal utility functions for json-delta."""
 
+import math
 from typing import Any
+
+from json_delta.errors import DiffError
 
 
 def json_equal(a: Any, b: Any) -> bool:
@@ -66,3 +69,49 @@ def json_type_of(value: Any) -> str:
     if isinstance(value, list):
         return "array"
     raise TypeError(f"Not a JSON type: {type(value).__name__}")
+
+
+def should_exclude_path(prop_path: list[str], key: str, exclude_paths: frozenset[str]) -> bool:
+    """Check if a key at the current path should be excluded."""
+    if not exclude_paths:
+        return False
+    return ".".join([*prop_path, key]) in exclude_paths
+
+
+def make_hashable(value: Any) -> Any:
+    """Make a JSON scalar safe for use as a dict key.
+
+    Python considers ``True == 1`` and ``False == 0``, so they collide
+    as dict keys.  We wrap bools in a tagged tuple to preserve identity.
+    """
+    if isinstance(value, bool):
+        return ("__bool__", value)
+    return value
+
+
+def validate_json_value(value: Any, name: str) -> None:
+    """Validate that a value is a valid JSON type (recursive).
+
+    Raises DiffError for non-JSON types or non-finite floats.
+    """
+    if value is None:
+        return
+    if isinstance(value, bool):
+        return
+    if isinstance(value, int):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise DiffError(f"Non-finite float in {name}: {value}")
+        return
+    if isinstance(value, str):
+        return
+    if isinstance(value, dict):
+        for v in value.values():
+            validate_json_value(v, name)
+        return
+    if isinstance(value, list):
+        for item in value:
+            validate_json_value(item, name)
+        return
+    raise DiffError(f"{name} contains non-JSON type: {type(value).__name__}")

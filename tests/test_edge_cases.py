@@ -186,7 +186,7 @@ class TestLargeArrays:
         old = {"items": [{"id": i, "val": i} for i in range(100)]}
         new = {"items": [{"id": i, "val": i} for i in range(100)]}
         new["items"][50]["val"] = 999
-        delta = diff_delta(old, new, array_keys={"items": "id"})
+        delta = diff_delta(old, new, array_identity_keys={"items": "id"})
         result = apply_delta(deep_clone(old), delta)
         assert result == new
 

@@ -53,7 +53,7 @@ states = [
 print("=== State Transition Log ===")
 total_ops = 0
 for i in range(1, len(states)):
-    delta = diff_delta(states[i - 1], states[i], array_keys={"findings": "company"})
+    delta = diff_delta(states[i - 1], states[i], array_identity_keys={"findings": "company"})
     total_ops += len(delta.operations)
 
     print(f"\nStep {i - 1} -> {i}  ({len(delta.operations)} ops)")

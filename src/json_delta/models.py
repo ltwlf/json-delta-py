@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from enum import StrEnum
 from functools import cached_property
 from typing import Any, Literal
 
@@ -64,6 +65,42 @@ class ValidationResult:
 
     valid: bool
     errors: tuple[str, ...]
+
+
+# ---------------------------------------------------------------------------
+# Enriched comparison tree
+# ---------------------------------------------------------------------------
+
+
+class ChangeType(StrEnum):
+    """Classification of a comparison tree node."""
+
+    UNCHANGED = "unchanged"
+    ADDED = "added"
+    REMOVED = "removed"
+    REPLACED = "replaced"
+    CONTAINER = "container"
+
+
+@dataclass(frozen=True, slots=True)
+class ComparisonNode:
+    """A node in the enriched comparison tree.
+
+    For ``CONTAINER`` nodes, ``value`` holds ``dict[str, ComparisonNode]``
+    (objects) or ``list[ComparisonNode]`` (arrays).  For leaf nodes,
+    ``value`` holds the actual JSON value.
+
+    Example::
+
+        node = compare(old_doc, new_doc)
+        if node.type == ChangeType.CONTAINER:
+            for key, child in node.value.items():
+                print(f"{key}: {child.type}")
+    """
+
+    type: ChangeType
+    value: Any = None
+    old_value: Any | None = None
 
 
 # ---------------------------------------------------------------------------

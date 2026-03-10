@@ -30,7 +30,7 @@ client_state["users"].append(
 )
 
 # Compute delta (what the client sends instead of the full document)
-delta = diff_delta(server_state, client_state, array_keys={"users": "id"})
+delta = diff_delta(server_state, client_state, array_identity_keys={"users": "id"})
 
 # Payload comparison
 full_size = len(json.dumps(client_state))
