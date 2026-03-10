@@ -100,25 +100,31 @@ Operation and Delta work as native Pydantic v2 field types — no `arbitrary_typ
 
 ```python
 from pydantic import BaseModel
-from json_delta import Operation, Delta
+from json_delta import Delta
 
-class Change(BaseModel):
-    operation: Operation  # just works
-    delta: Delta          # just works
+class AuditEntry(BaseModel):
+    delta: Delta      # just works — no arbitrary_types_allowed needed
     actor: str = ""
 
-# From raw dicts (e.g., API request body)
-change = Change(
-    operation={"op": "add", "path": "$.name", "value": "Alice"},
-    delta={"format": "json-delta", "version": 1, "operations": []},
+# From a raw dict (e.g., API request body or JSON payload)
+entry = AuditEntry(
+    delta={
+        "format": "json-delta",
+        "version": 1,
+        "operations": [
+            {"op": "replace", "path": "$.user.role", "value": "admin", "oldValue": "viewer"},
+            {"op": "add", "path": "$.user.verified", "value": True},
+        ],
+    },
     actor="admin",
 )
 
-change.operation.op          # "add" — typed access
-change.model_dump()          # plain dicts, no subclass instances
-change.model_dump_json()     # clean JSON serialization
-Change.model_validate_json(  # full round-trip
-    change.model_dump_json()
+entry.delta.operations[0].op     # "replace" — typed access
+entry.delta.operations[0].path   # "$.user.role"
+entry.model_dump()               # plain dicts, no subclass instances
+entry.model_dump_json()          # clean JSON serialization
+AuditEntry.model_validate_json(  # full round-trip
+    entry.model_dump_json()
 )
 ```
 
