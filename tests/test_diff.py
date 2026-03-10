@@ -1,7 +1,10 @@
 """Tests for json_delta.diff — delta computation."""
 
+import re
+
 import pytest
 
+from json_delta._identity import IdentityResolver
 from json_delta.apply import apply_delta
 from json_delta.diff import diff_delta
 from json_delta.errors import DiffError
@@ -161,7 +164,7 @@ class TestIndexArrays:
         """$index identity mode explicitly set."""
         old = {"items": [1, 2]}
         new = {"items": [1, 3]}
-        delta = diff_delta(old, new, array_keys={"items": "$index"})
+        delta = diff_delta(old, new, array_identity_keys={"items": "$index"})
         assert len(delta["operations"]) == 1
         assert delta["operations"][0]["path"] == "$.items[1]"
 
@@ -175,7 +178,7 @@ class TestKeyedArrays:
     def test_update_element_property(self) -> None:
         old = {"items": [{"id": 1, "name": "Widget", "price": 10}]}
         new = {"items": [{"id": 1, "name": "Widget Pro", "price": 10}]}
-        delta = diff_delta(old, new, array_keys={"items": "id"})
+        delta = diff_delta(old, new, array_identity_keys={"items": "id"})
         ops = delta["operations"]
         assert len(ops) == 1
         assert ops[0]["path"] == "$.items[?(@.id==1)].name"
@@ -184,7 +187,7 @@ class TestKeyedArrays:
     def test_add_element(self) -> None:
         old = {"items": [{"id": 1, "name": "Widget"}]}
         new = {"items": [{"id": 1, "name": "Widget"}, {"id": 2, "name": "Gadget"}]}
-        delta = diff_delta(old, new, array_keys={"items": "id"})
+        delta = diff_delta(old, new, array_identity_keys={"items": "id"})
         add_ops = [o for o in delta["operations"] if o["op"] == "add"]
         assert len(add_ops) == 1
         assert add_ops[0]["value"] == {"id": 2, "name": "Gadget"}
@@ -192,7 +195,7 @@ class TestKeyedArrays:
     def test_remove_element(self) -> None:
         old = {"items": [{"id": 1, "name": "Widget"}, {"id": 2, "name": "Gadget"}]}
         new = {"items": [{"id": 1, "name": "Widget"}]}
-        delta = diff_delta(old, new, array_keys={"items": "id"})
+        delta = diff_delta(old, new, array_identity_keys={"items": "id"})
         remove_ops = [o for o in delta["operations"] if o["op"] == "remove"]
         assert len(remove_ops) == 1
         assert remove_ops[0]["oldValue"] == {"id": 2, "name": "Gadget"}
@@ -200,14 +203,14 @@ class TestKeyedArrays:
     def test_string_id(self) -> None:
         old = {"items": [{"id": "a", "val": 1}]}
         new = {"items": [{"id": "a", "val": 2}]}
-        delta = diff_delta(old, new, array_keys={"items": "id"})
+        delta = diff_delta(old, new, array_identity_keys={"items": "id"})
         assert delta["operations"][0]["path"] == "$.items[?(@.id=='a')].val"
 
     def test_numeric_id_typed_filter(self) -> None:
         """Numeric IDs should produce number literals in filter, not string."""
         old = {"items": [{"id": 42, "val": 1}]}
         new = {"items": [{"id": 42, "val": 2}]}
-        delta = diff_delta(old, new, array_keys={"items": "id"})
+        delta = diff_delta(old, new, array_identity_keys={"items": "id"})
         assert "id==42" in delta["operations"][0]["path"]
         assert "id=='42'" not in delta["operations"][0]["path"]
 
@@ -216,7 +219,7 @@ class TestKeyedArrays:
             diff_delta(
                 {"items": [{"name": "Widget"}]},
                 {"items": [{"name": "Gadget"}]},
-                array_keys={"items": "id"},
+                array_identity_keys={"items": "id"},
             )
 
 
@@ -229,7 +232,7 @@ class TestValueArrays:
     def test_string_values_add(self) -> None:
         old = {"tags": ["urgent"]}
         new = {"tags": ["urgent", "review"]}
-        delta = diff_delta(old, new, array_keys={"tags": "$value"})
+        delta = diff_delta(old, new, array_identity_keys={"tags": "$value"})
         add_ops = [o for o in delta["operations"] if o["op"] == "add"]
         assert len(add_ops) == 1
         assert "=='review'" in add_ops[0]["path"]
@@ -237,7 +240,7 @@ class TestValueArrays:
     def test_string_values_remove(self) -> None:
         old = {"tags": ["urgent", "draft"]}
         new = {"tags": ["urgent"]}
-        delta = diff_delta(old, new, array_keys={"tags": "$value"})
+        delta = diff_delta(old, new, array_identity_keys={"tags": "$value"})
         remove_ops = [o for o in delta["operations"] if o["op"] == "remove"]
         assert len(remove_ops) == 1
         assert "=='draft'" in remove_ops[0]["path"]
@@ -245,7 +248,7 @@ class TestValueArrays:
     def test_number_values(self) -> None:
         old = {"scores": [10, 20]}
         new = {"scores": [10, 30]}
-        delta = diff_delta(old, new, array_keys={"scores": "$value"})
+        delta = diff_delta(old, new, array_identity_keys={"scores": "$value"})
         assert len(delta["operations"]) == 2  # remove 20, add 30
 
 
@@ -305,7 +308,10 @@ class TestNestedArrayKeys:
     def test_nested_keyed_array(self) -> None:
         old = {"users": [{"id": 1, "contacts": [{"type": "email", "val": "a@b.com"}]}]}
         new = {"users": [{"id": 1, "contacts": [{"type": "email", "val": "new@b.com"}]}]}
-        delta = diff_delta(old, new, array_keys={"users": "id", "users.contacts": "type"})
+        delta = diff_delta(
+            old, new,
+            array_identity_keys={"users": "id", "users.contacts": "type"},
+        )
         ops = delta["operations"]
         assert len(ops) == 1
         # Should target the nested property through both filters
@@ -347,7 +353,7 @@ class TestDiffErrors:
 
 
 # ---------------------------------------------------------------------------
-# Exclude keys
+# Exclude keys (flat name, any depth)
 # ---------------------------------------------------------------------------
 
 
@@ -386,7 +392,7 @@ class TestExcludeKeys:
         """Exclusion works at any depth, including inside keyed array elements."""
         old = {"items": [{"id": 1, "name": "Widget", "metadata": {"v": 1}}]}
         new = {"items": [{"id": 1, "name": "Widget", "metadata": {"v": 2}}]}
-        delta = diff_delta(old, new, array_keys={"items": "id"}, exclude_keys={"metadata"})
+        delta = diff_delta(old, new, array_identity_keys={"items": "id"}, exclude_keys={"metadata"})
         assert delta["operations"] == []
 
     def test_exclude_nested_property(self) -> None:
@@ -432,6 +438,200 @@ class TestExcludeKeys:
 
 
 # ---------------------------------------------------------------------------
+# Exclude paths (dotted path, specific depth)
+# ---------------------------------------------------------------------------
+
+
+class TestExcludePaths:
+    def test_exclude_path_skips_specific_depth(self) -> None:
+        """exclude_paths skips at the exact dotted path depth."""
+        old = {"user": {"name": "Alice", "cache": {"stale": True}}}
+        new = {"user": {"name": "Bob", "cache": {"stale": False}}}
+        delta = diff_delta(old, new, exclude_paths={"user.cache"})
+        assert len(delta["operations"]) == 1
+        assert delta["operations"][0]["path"] == "$.user.name"
+
+    def test_exclude_path_does_not_match_other_depths(self) -> None:
+        """exclude_paths='user.cache' does NOT skip 'product.cache'."""
+        old = {"user": {"cache": "a"}, "product": {"cache": "b"}}
+        new = {"user": {"cache": "x"}, "product": {"cache": "y"}}
+        delta = diff_delta(old, new, exclude_paths={"user.cache"})
+        paths = {op["path"] for op in delta["operations"]}
+        assert "$.product.cache" in paths
+        assert "$.user.cache" not in paths
+
+    def test_exclude_path_nested(self) -> None:
+        """Multi-level dotted paths work."""
+        old = {"a": {"b": {"c": 1, "d": 2}}}
+        new = {"a": {"b": {"c": 99, "d": 99}}}
+        delta = diff_delta(old, new, exclude_paths={"a.b.c"})
+        assert len(delta["operations"]) == 1
+        assert delta["operations"][0]["path"] == "$.a.b.d"
+
+    def test_exclude_path_combined_with_exclude_keys(self) -> None:
+        """Both exclude_keys and exclude_paths work together."""
+        old = {"user": {"name": "Alice", "cache": "old"}, "meta": "v1"}
+        new = {"user": {"name": "Bob", "cache": "new"}, "meta": "v2"}
+        delta = diff_delta(old, new, exclude_keys={"meta"}, exclude_paths={"user.cache"})
+        assert len(delta["operations"]) == 1
+        assert delta["operations"][0]["path"] == "$.user.name"
+
+    def test_exclude_path_inside_keyed_array(self) -> None:
+        """exclude_paths works inside keyed array element context."""
+        old = {"items": [{"id": 1, "name": "Widget", "temp": "x"}]}
+        new = {"items": [{"id": 1, "name": "Gadget", "temp": "y"}]}
+        delta = diff_delta(
+            old, new,
+            array_identity_keys={"items": "id"},
+            exclude_paths={"items.temp"},
+        )
+        assert len(delta["operations"]) == 1
+        assert delta["operations"][0]["path"].endswith(".name")
+
+
+# ---------------------------------------------------------------------------
+# Callable identity keys
+# ---------------------------------------------------------------------------
+
+
+class TestCallableIdentityKeys:
+    def test_tuple_form_basic(self) -> None:
+        """Tuple (key_name, callable) resolves identity via callable."""
+        old = {"items": [{"id": 1, "val": 10}]}
+        new = {"items": [{"id": 1, "val": 20}]}
+        delta = diff_delta(
+            old, new,
+            array_identity_keys={"items": ("id", lambda e: e["id"])},
+        )
+        assert len(delta.operations) == 1
+        assert "id==1" in delta.operations[0].path
+        assert delta.operations[0].path.endswith(".val")
+
+    def test_identity_resolver_dataclass(self) -> None:
+        """IdentityResolver dataclass works for custom identity."""
+        old = {"items": [{"type": "A", "region": "US", "val": 10}]}
+        new = {"items": [{"type": "A", "region": "US", "val": 20}]}
+        delta = diff_delta(
+            old, new,
+            array_identity_keys={
+                "items": IdentityResolver("type", lambda e: f"{e['type']}-{e['region']}"),
+            },
+        )
+        assert len(delta.operations) == 1
+        assert "type=='A-US'" in delta.operations[0].path
+
+    def test_callable_add_element(self) -> None:
+        """Adding an element with callable identity key."""
+        old = {"items": [{"id": 1, "name": "Widget"}]}
+        new = {"items": [{"id": 1, "name": "Widget"}, {"id": 2, "name": "Gadget"}]}
+        delta = diff_delta(
+            old, new,
+            array_identity_keys={"items": ("id", lambda e: e["id"])},
+        )
+        add_ops = [op for op in delta.operations if op.op == "add"]
+        assert len(add_ops) == 1
+
+    def test_callable_remove_element(self) -> None:
+        """Removing an element with callable identity key."""
+        old = {"items": [{"id": 1, "name": "A"}, {"id": 2, "name": "B"}]}
+        new = {"items": [{"id": 1, "name": "A"}]}
+        delta = diff_delta(
+            old, new,
+            array_identity_keys={"items": ("id", lambda e: e["id"])},
+        )
+        remove_ops = [op for op in delta.operations if op.op == "remove"]
+        assert len(remove_ops) == 1
+
+    def test_callable_composite_key(self) -> None:
+        """Callable can compute composite identity from multiple fields."""
+        old = {"events": [{"type": "click", "target": "btn", "count": 5}]}
+        new = {"events": [{"type": "click", "target": "btn", "count": 10}]}
+        delta = diff_delta(
+            old, new,
+            array_identity_keys={
+                "events": ("type", lambda e: f"{e['type']}:{e['target']}"),
+            },
+        )
+        assert len(delta.operations) == 1
+        assert "type=='click:btn'" in delta.operations[0].path
+
+    def test_callable_roundtrip(self) -> None:
+        """Callable identity keys produce valid deltas that round-trip."""
+        old = {"items": [{"sku": "A1", "price": 100}]}
+        new = {"items": [{"sku": "A1", "price": 90}]}
+        delta = diff_delta(
+            old, new,
+            array_identity_keys={"items": ("sku", lambda e: e["sku"])},
+        )
+        result = apply_delta(deep_clone(old), delta)
+        assert result == new
+
+
+# ---------------------------------------------------------------------------
+# Regex-based array key routing
+# ---------------------------------------------------------------------------
+
+
+class TestRegexPatternRouting:
+    def test_regex_matches_array_path(self) -> None:
+        """Regex pattern matches the dotted property path."""
+        old = {"users": [{"id": 1, "name": "Alice"}]}
+        new = {"users": [{"id": 1, "name": "Bob"}]}
+        delta = diff_delta(
+            old, new,
+            array_identity_keys={re.compile(r"^users$"): "id"},
+        )
+        assert len(delta.operations) == 1
+        assert "id==1" in delta.operations[0].path
+
+    def test_regex_matches_multiple_arrays(self) -> None:
+        """One regex pattern can match multiple array paths."""
+        old = {"users": [{"id": 1, "name": "A"}], "products": [{"id": 1, "title": "X"}]}
+        new = {"users": [{"id": 1, "name": "B"}], "products": [{"id": 1, "title": "Y"}]}
+        delta = diff_delta(
+            old, new,
+            array_identity_keys={re.compile(r"^(users|products)$"): "id"},
+        )
+        assert all("id==1" in op.path for op in delta.operations)
+
+    def test_exact_string_takes_priority_over_regex(self) -> None:
+        """Exact string match is checked before regex patterns."""
+        old = {"items": [{"id": 1, "val": 10}]}
+        new = {"items": [{"id": 1, "val": 20}]}
+        delta = diff_delta(
+            old, new,
+            array_identity_keys={
+                "items": "id",
+                re.compile(r"items"): "$value",  # would fail if matched
+            },
+        )
+        assert "id==1" in delta.operations[0].path
+
+    def test_regex_with_callable_value(self) -> None:
+        """Regex key + callable identity value."""
+        old = {"data": {"items": [{"sku": "A", "price": 10}]}}
+        new = {"data": {"items": [{"sku": "A", "price": 20}]}}
+        delta = diff_delta(
+            old, new,
+            array_identity_keys={
+                re.compile(r"items$"): ("sku", lambda e: e["sku"]),
+            },
+        )
+        assert len(delta.operations) == 1
+        assert "sku=='A'" in delta.operations[0].path
+
+    def test_no_match_falls_back_to_index(self) -> None:
+        """When no string or regex matches, falls back to $index."""
+        old = {"tags": ["a", "b"]}
+        new = {"tags": ["a", "c"]}
+        delta = diff_delta(
+            old, new,
+            array_identity_keys={re.compile(r"^items$"): "id"},
+        )
+        assert delta.operations[0].path == "$.tags[1]"
+
+
+# ---------------------------------------------------------------------------
 # Conformance: apply(source, diff(source, target)) == target
 # ---------------------------------------------------------------------------
 
@@ -450,8 +650,8 @@ class TestDiffConformance:
         source = fixture["source"]
         target = fixture["target"]
         hints = fixture.get("computeHints", {})
-        array_keys = hints.get("arrayKeys")
-        delta = diff_delta(source, target, array_keys=array_keys)
+        array_identity_keys = hints.get("arrayKeys")
+        delta = diff_delta(source, target, array_identity_keys=array_identity_keys)
         result = apply_delta(deep_clone(source), delta)
         assert result == target
 
@@ -461,8 +661,8 @@ class TestDiffConformance:
         source = fixture["source"]
         target = fixture["target"]
         hints = fixture.get("computeHints", {})
-        array_keys = hints.get("arrayKeys")
-        delta = diff_delta(source, target, array_keys=array_keys)
+        array_identity_keys = hints.get("arrayKeys")
+        delta = diff_delta(source, target, array_identity_keys=array_identity_keys)
         inverse = invert_delta(delta)
         recovered = apply_delta(deep_clone(target), inverse)
         assert recovered == source

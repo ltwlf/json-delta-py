@@ -165,18 +165,79 @@ old = {"items": [{"id": 1, "name": "Widget"}, {"id": 2, "name": "Gadget"}]}
 new = {"items": [{"id": 1, "name": "Widget Pro"}, {"id": 2, "name": "Gadget"}]}
 
 # Key-based: track elements by a property value
-delta = diff_delta(old, new, array_keys={"items": "id"})
+delta = diff_delta(old, new, array_identity_keys={"items": "id"})
 # Path: $.items[?(@.id==1)].name — stable across reordering
 
 # Value-based: for primitive arrays
 old_tags = {"tags": ["urgent", "draft"]}
 new_tags = {"tags": ["urgent", "review"]}
-delta = diff_delta(old_tags, new_tags, array_keys={"tags": "$value"})
+delta = diff_delta(old_tags, new_tags, array_identity_keys={"tags": "$value"})
 # Paths: $.tags[?(@=='draft')] (remove), $.tags[?(@=='review')] (add)
 
 # Index-based (default): track elements by position
 delta = diff_delta(old, new)
 # Path: $.items[0].name — positional, fragile across concurrent changes
+```
+
+### Advanced Identity Keys
+
+For complex scenarios, use callable identity keys or regex-based routing:
+
+```python
+import re
+from json_delta import diff_delta, IdentityResolver
+
+# Callable tuple: (property_name, extractor_function)
+delta = diff_delta(old, new, array_identity_keys={
+    "assets": ("ref", lambda e: e["ref"]),
+})
+
+# IdentityResolver: explicit resolver class
+resolver = IdentityResolver(property="sku", resolve=lambda e: e["sku"])
+delta = diff_delta(old, new, array_identity_keys={"catalog": resolver})
+
+# Regex routing: one pattern matches multiple array paths
+delta = diff_delta(old, new, array_identity_keys={
+    re.compile(r"employees$"): "id",    # matches employees arrays at any depth
+    re.compile(r"items$"): "sku",       # matches items arrays at any depth
+})
+```
+
+### Excluding Properties
+
+Skip properties by name (any depth) or by specific dotted path:
+
+```python
+# exclude_keys: skip a key name at any depth
+delta = diff_delta(old, new, exclude_keys={"updatedAt", "_etag"})
+
+# exclude_paths: skip at a specific path only
+delta = diff_delta(old, new, exclude_paths={"user.cache", "meta.hash"})
+
+# Combined: exclude_keys for noise, exclude_paths for targeted exclusion
+delta = diff_delta(old, new,
+    exclude_keys={"_etag"},
+    exclude_paths={"user.cache"},
+)
+```
+
+### Enriched Comparison Tree
+
+The `compare()` function returns a full comparison tree including unchanged values — ideal for rendering side-by-side diffs or change-highlighted UIs:
+
+```python
+from json_delta import compare, ChangeType
+
+tree = compare(
+    {"name": "Alice", "role": "viewer", "email": "a@example.com"},
+    {"name": "Alice", "role": "admin", "team": "eng"},
+)
+
+# tree.type == ChangeType.CONTAINER
+# tree.value["name"].type == ChangeType.UNCHANGED
+# tree.value["role"].type == ChangeType.REPLACED  (.value="admin", .old_value="viewer")
+# tree.value["email"].type == ChangeType.REMOVED  (.old_value="a@example.com")
+# tree.value["team"].type == ChangeType.ADDED     (.value="eng")
 ```
 
 ## API Reference
@@ -185,7 +246,7 @@ delta = diff_delta(old, new)
 
 | Function | Description |
 | --- | --- |
-| `diff_delta(old, new, *, array_keys=None, reversible=True)` | Compute a delta between two objects |
+| `diff_delta(old, new, *, array_identity_keys=None, exclude_keys=None, exclude_paths=None, reversible=True)` | Compute a delta between two objects |
 | `apply_delta(obj, delta)` | Apply a delta to an object (mutates in place, use return value) |
 | `validate_delta(delta)` | Validate delta structure, returns `ValidationResult` |
 | `invert_delta(delta)` | Compute the inverse of a reversible delta |
@@ -194,6 +255,7 @@ delta = diff_delta(old, new)
 | `build_path(segments)` | Build a canonical path string from segments |
 | `describe_path(path)` | Human-readable description (`"$.user.name"` → `"user > name"`) |
 | `resolve_path(path, document)` | Resolve filter path to RFC 6901 JSON Pointer |
+| `compare(old, new, *, array_identity_keys=None, exclude_keys=None, exclude_paths=None)` | Enriched comparison tree for visual diff rendering |
 | `to_json_patch(delta, document)` | Convert delta to RFC 6902 JSON Patch |
 | `from_json_patch(patch)` | Create delta from RFC 6902 JSON Patch |
 
@@ -212,6 +274,18 @@ delta = diff_delta(old, new)
 | `Delta.create(*operations, **ext)` | Create a delta with standard envelope |
 | `Delta.from_dict(d)` | Create from raw dict with validation |
 | `Delta.from_json_patch(patch)` | Create from RFC 6902 JSON Patch |
+
+### Types
+
+| Type | Description |
+| --- | --- |
+| `Delta` | Delta document (dict subclass with typed properties) |
+| `Operation` | Single operation (dict subclass with typed properties) |
+| `IdentityResolver` | Custom identity resolution: `IdentityResolver(property, resolve)` |
+| `ComparisonNode` | Node in the enriched comparison tree |
+| `ChangeType` | Change classification: `unchanged`, `added`, `removed`, `replaced`, `container` |
+| `ValidationResult` | Structured validation result: `.valid`, `.errors` |
+| `OpType` | Operation type literal: `"add"`, `"remove"`, `"replace"` |
 
 ## JSON Delta vs JSON Patch
 
@@ -237,6 +311,7 @@ Pick the example that matches your use case:
 | [undo_redo.py](examples/undo_redo.py) | **Editor / config** | Multi-step undo/redo stack built on delta inversion |
 | [data_sync.py](examples/data_sync.py) | **Client-server sync** | Compute on client, serialize, validate + apply on server |
 | [state_transitions.py](examples/state_transitions.py) | **Agent / workflow** | Track state changes between steps with affected paths |
+| [advanced_identity.py](examples/advanced_identity.py) | **Advanced identity** | Callable keys, regex routing, exclude_paths, comparison tree |
 
 ```bash
 uv run python examples/quick_api_payload.py   # start here
@@ -246,6 +321,7 @@ uv run python examples/audit_log.py
 uv run python examples/undo_redo.py
 uv run python examples/data_sync.py
 uv run python examples/state_transitions.py
+uv run python examples/advanced_identity.py   # advanced features
 ```
 
 ## Specification

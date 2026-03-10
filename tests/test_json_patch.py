@@ -219,7 +219,7 @@ class TestRoundTrip:
     def test_keyed_array_changes(self) -> None:
         old = {"items": [{"id": 1, "name": "Widget"}, {"id": 2, "name": "Gadget"}]}
         new = {"items": [{"id": 1, "name": "Widget Pro"}, {"id": 2, "name": "Gadget"}]}
-        delta = diff_delta(old, new, array_keys={"items": "id"})
+        delta = diff_delta(old, new, array_identity_keys={"items": "id"})
         patch = to_json_patch(delta, old)
         assert len(patch) == 1
         assert patch[0]["path"] == "/items/0/name"

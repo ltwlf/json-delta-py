@@ -19,13 +19,15 @@ uv build                         # Build wheel + sdist
 src/json_delta/
     __init__.py       # Public API re-exports and __all__
     errors.py         # Exception hierarchy (JsonDeltaError → PathError, ApplyError, etc.)
-    models.py         # PathSegment dataclasses, ValidationResult, Delta/Operation dict subclasses
+    models.py         # PathSegment dataclasses, ValidationResult, ChangeType, ComparisonNode, Delta/Operation
     _utils.py         # Internal helpers: json_equal, json_type_of
+    _identity.py      # Shared identity resolution (IdentityResolver, resolve_identity, extract_identity)
     path.py           # Path parser/builder + describe_path, resolve_path
     validate.py       # Structural validation (validate_delta)
     apply.py          # Delta application (apply_delta)
     invert.py         # Delta inversion (invert_delta, revert_delta)
-    diff.py           # Delta computation (diff_delta)
+    diff.py           # Delta computation (diff_delta) — callable keys, regex routing, exclude_paths
+    compare.py        # Enriched comparison tree (compare) — visual diff rendering
     json_patch.py     # JSON Patch (RFC 6902) interop: to_json_patch, from_json_patch
     py.typed          # PEP 561 marker
 
@@ -40,7 +42,9 @@ tests/
     test_invert.py    # Inversion + revert round-trips
     test_extensions.py  # Extension property preservation
     test_conformance.py # Level 1 + Level 2 conformance fixtures
-    test_diff.py      # Diff computation + all array identity models
+    test_diff.py      # Diff computation + all identity models + callable/regex/exclude_paths
+    test_compare.py   # Enriched comparison tree tests
+    test_cross_validation.py # Cross-validation with json-diff-ts
     test_edge_cases.py  # Cross-module edge cases
     test_json_patch.py  # JSON Patch (RFC 6902) interop
     test_pydantic.py    # Pydantic v2 integration (conditional on pydantic)

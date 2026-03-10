@@ -30,7 +30,7 @@ target = {
 }
 
 # Compute a delta using SKU as the identity key
-delta = diff_delta(source, target, array_keys={"products": "sku"})
+delta = diff_delta(source, target, array_identity_keys={"products": "sku"})
 
 print("=== Inventory Changes ===")
 for op in delta:

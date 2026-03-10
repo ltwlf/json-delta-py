@@ -53,10 +53,10 @@ assert result == updated
 # --- Key-based diff — paths use identity ---
 
 print(f"\n{'=' * 60}")
-print("KEY-BASED (array_keys) — paths use stable identity")
+print("KEY-BASED (array_identity_keys) — paths use stable identity")
 print("=" * 60)
 
-keyed_delta = diff_delta(original, updated, array_keys={"tasks": "id"})
+keyed_delta = diff_delta(original, updated, array_identity_keys={"tasks": "id"})
 
 print(f"\n{len(keyed_delta.operations)} operations:")
 for op in keyed_delta:
@@ -110,5 +110,5 @@ print(f"  t1.done = {t1_index['done']}  (t1 was modified instead)")
 
 print(f"\n{'=' * 60}")
 print("RESULT: Key-based diffs are stable across reordering.")
-print("        Use array_keys for any array with identity keys.")
+print("        Use array_identity_keys for any array with identity keys.")
 print("=" * 60)

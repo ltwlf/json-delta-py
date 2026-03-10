@@ -217,7 +217,7 @@ class TestDiffDeltaCrossValidation:
         delta = diff_delta(
             {"items": [{"id": "1", "name": "Widget"}]},
             {"items": [{"id": "1", "name": "Gadget"}]},
-            array_keys={"items": "id"},
+            array_identity_keys={"items": "id"},
         )
         assert delta["operations"] == [
             {"op": "replace", "path": "$.items[?(@.id=='1')].name", "value": "Gadget", "oldValue": "Widget"},
@@ -228,7 +228,7 @@ class TestDiffDeltaCrossValidation:
         delta = diff_delta(
             {"items": [{"id": 1, "name": "Widget"}]},
             {"items": [{"id": 1, "name": "Gadget"}]},
-            array_keys={"items": "id"},
+            array_identity_keys={"items": "id"},
         )
         assert delta["operations"] == [
             {"op": "replace", "path": "$.items[?(@.id==1)].name", "value": "Gadget", "oldValue": "Widget"},
@@ -239,7 +239,7 @@ class TestDiffDeltaCrossValidation:
         delta = diff_delta(
             {"items": [{"id": "1", "name": "Widget"}]},
             {"items": [{"id": "1", "name": "Widget"}, {"id": "2", "name": "Gadget"}]},
-            array_keys={"items": "id"},
+            array_identity_keys={"items": "id"},
         )
         assert len(delta["operations"]) == 1
         op = delta["operations"][0]
@@ -252,7 +252,7 @@ class TestDiffDeltaCrossValidation:
         delta = diff_delta(
             {"tags": ["urgent", "review"]},
             {"tags": ["urgent", "draft"]},
-            array_keys={"tags": "$value"},
+            array_identity_keys={"tags": "$value"},
         )
         assert len(delta["operations"]) == 2
         remove_op = next(op for op in delta["operations"] if op["op"] == "remove")
@@ -265,7 +265,7 @@ class TestDiffDeltaCrossValidation:
         delta = diff_delta(
             {"scores": [10, 20, 30]},
             {"scores": [10, 25, 30]},
-            array_keys={"scores": "$value"},
+            array_identity_keys={"scores": "$value"},
         )
         assert len(delta["operations"]) == 2
         remove_op = next(op for op in delta["operations"] if op["op"] == "remove")
@@ -505,7 +505,7 @@ class TestRevertDeltaCrossValidation:
         """TS: it('full round-trip: source → applyDelta → revertDelta == source')"""
         source = {"name": "Alice", "age": 30, "tags": ["admin"]}
         target = {"name": "Bob", "age": 31, "tags": ["admin", "user"]}
-        delta = diff_delta(source, target, array_keys={"tags": "$value"})
+        delta = diff_delta(source, target, array_identity_keys={"tags": "$value"})
 
         applied = apply_delta(deep_clone(source), delta)
         assert applied == target
@@ -778,7 +778,7 @@ class TestConformanceCrossValidation:
                 {"id": "4", "name": "Thingamajig", "price": 40},
             ]
         }
-        computed = diff_delta(source, target, array_keys={"items": "id"})
+        computed = diff_delta(source, target, array_identity_keys={"items": "id"})
         result = apply_delta(deep_clone(source), computed)
         assert result == target
 
@@ -818,7 +818,7 @@ class TestIntegrationRoundTripsCrossValidation:
                 {"id": 2, "name": "Gadget", "details": {"color": "blue"}},
             ],
         }
-        delta = diff_delta(source, target, array_keys={"items": "id"})
+        delta = diff_delta(source, target, array_identity_keys={"items": "id"})
         assert len(delta["operations"]) == 1
         assert delta["operations"][0]["path"] == "$.items[?(@.id==1)].details.color"
         assert apply_delta(deep_clone(source), delta) == target
@@ -847,7 +847,7 @@ class TestComplexScenariosCrossValidation:
                 {"id": 4, "name": "item4"},
             ]
         }
-        delta = diff_delta(source, target, array_keys={"items": "id"})
+        delta = diff_delta(source, target, array_identity_keys={"items": "id"})
         result = apply_delta(copy.deepcopy(source), delta)
         assert result == target
 
@@ -910,7 +910,7 @@ class TestComplexScenariosCrossValidation:
         delta = diff_delta(
             source,
             target,
-            array_keys={
+            array_identity_keys={
                 "departments": "name",
                 "departments.teams": "id",
             },
@@ -922,7 +922,7 @@ class TestComplexScenariosCrossValidation:
         """TS: it('tracks array changes by array value') adapted to delta"""
         old_obj = {"items": ["apple", "banana", "orange"]}
         new_obj = {"items": ["orange", "lemon"]}
-        delta = diff_delta(old_obj, new_obj, array_keys={"items": "$value"})
+        delta = diff_delta(old_obj, new_obj, array_identity_keys={"items": "$value"})
 
         # Should have removes for apple and banana, and add for lemon
         remove_ops = [op for op in delta["operations"] if op["op"] == "remove"]
@@ -938,7 +938,7 @@ class TestComplexScenariosCrossValidation:
         """Value-based array round-trip via diff/apply/revert."""
         source = {"tags": ["red", "blue"]}
         target = {"tags": ["blue", "green"]}
-        delta = diff_delta(source, target, array_keys={"tags": "$value"})
+        delta = diff_delta(source, target, array_identity_keys={"tags": "$value"})
 
         applied = apply_delta(copy.deepcopy(source), delta)
         assert set(applied["tags"]) == set(target["tags"])

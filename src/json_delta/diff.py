@@ -9,6 +9,12 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from json_delta._identity import (
+    ArrayIdentityKeys,
+    _ResolvedIdentity,
+    extract_identity,
+    resolve_identity,
+)
 from json_delta._utils import json_equal
 from json_delta.errors import DiffError
 from json_delta.models import (
@@ -28,8 +34,9 @@ def diff_delta(
     old_obj: Any,
     new_obj: Any,
     *,
-    array_keys: dict[str, str] | None = None,
+    array_identity_keys: ArrayIdentityKeys | None = None,
     exclude_keys: set[str] | None = None,
+    exclude_paths: set[str] | None = None,
     reversible: bool = True,
 ) -> Delta:
     """Compute a JSON Delta between two objects.
@@ -37,13 +44,24 @@ def diff_delta(
     Args:
         old_obj: The source document.
         new_obj: The target document.
-        array_keys: Mapping from dotted property path to identity key.
-            - A string key name (e.g., ``"id"``) → key-based identity.
-            - ``"$value"`` → value-based identity.
-            - ``"$index"`` → index-based identity (also the default).
+        array_identity_keys: Mapping from dotted property path (or regex
+            pattern) to identity key.  Values can be:
+
+            - A string key name (e.g., ``"id"``) — key-based identity.
+            - ``"$value"`` — value-based identity for primitive arrays.
+            - ``"$index"`` — index-based identity (also the default).
+            - A ``(str, Callable)`` tuple — ``(key_property, resolver)``.
+            - An :class:`IdentityResolver` instance.
+
+            Dict keys can be exact strings or compiled ``re.Pattern``
+            objects for regex-based routing.
         exclude_keys: Property names to skip during comparison at any depth.
             Matching keys are invisible to the diff engine — they produce no
             operations regardless of whether they differ, are added, or removed.
+        exclude_paths: Dotted property paths to skip during comparison at a
+            specific depth.  For example, ``{"user.cache"}`` skips the ``cache``
+            property only when nested under ``user``, while ``exclude_keys``
+            would skip ``cache`` at every depth.
         reversible: If True (default), include ``oldValue`` on replace/remove.
 
     Returns:
@@ -55,9 +73,11 @@ def diff_delta(
     _validate_json_value(old_obj, "old_obj")
     _validate_json_value(new_obj, "new_obj")
 
+    _keys = array_identity_keys or {}
     _exclude: frozenset[str] = frozenset(exclude_keys) if exclude_keys else frozenset()
+    _exclude_paths: frozenset[str] = frozenset(exclude_paths) if exclude_paths else frozenset()
     operations: list[Operation] = []
-    _diff_values(old_obj, new_obj, [], [], array_keys or {}, _exclude, reversible, operations)
+    _diff_values(old_obj, new_obj, [], [], _keys, _exclude, _exclude_paths, reversible, operations)
 
     return Delta({
         "format": "json-delta",
@@ -76,8 +96,9 @@ def _diff_values(
     new: Any,
     segments: list[_Segment],
     prop_path: list[str],
-    array_keys: dict[str, str],
+    identity_keys: ArrayIdentityKeys,
     exclude: frozenset[str],
+    exclude_paths: frozenset[str],
     reversible: bool,
     operations: list[Operation],
 ) -> None:
@@ -92,9 +113,9 @@ def _diff_values(
     new_is_list = isinstance(new, list)
 
     if old_is_dict and new_is_dict:
-        _diff_objects(old, new, segments, prop_path, array_keys, exclude, reversible, operations)
+        _diff_objects(old, new, segments, prop_path, identity_keys, exclude, exclude_paths, reversible, operations)
     elif old_is_list and new_is_list:
-        _diff_arrays(old, new, segments, prop_path, array_keys, exclude, reversible, operations)
+        _diff_arrays(old, new, segments, prop_path, identity_keys, exclude, exclude_paths, reversible, operations)
     else:
         # Type change or scalar difference → single replace
         _emit_replace(old, new, segments, reversible, operations)
@@ -105,8 +126,9 @@ def _diff_objects(
     new: dict[str, Any],
     segments: list[_Segment],
     prop_path: list[str],
-    array_keys: dict[str, str],
+    identity_keys: ArrayIdentityKeys,
     exclude: frozenset[str],
+    exclude_paths: frozenset[str],
     reversible: bool,
     operations: list[Operation],
 ) -> None:
@@ -114,6 +136,9 @@ def _diff_objects(
     all_keys = sorted((set(old.keys()) | set(new.keys())) - exclude)
 
     for key in all_keys:
+        if _should_exclude_path(prop_path, key, exclude_paths):
+            continue
+
         seg = PropertySegment(name=key)
         child_segments = [*segments, seg]
         child_prop_path = [*prop_path, key]
@@ -125,7 +150,7 @@ def _diff_objects(
         else:
             _diff_values(
                 old[key], new[key], child_segments, child_prop_path,
-                array_keys, exclude, reversible, operations,
+                identity_keys, exclude, exclude_paths, reversible, operations,
             )
 
 
@@ -134,21 +159,23 @@ def _diff_arrays(
     new: list[Any],
     segments: list[_Segment],
     prop_path: list[str],
-    array_keys: dict[str, str],
+    identity_keys: ArrayIdentityKeys,
     exclude: frozenset[str],
+    exclude_paths: frozenset[str],
     reversible: bool,
     operations: list[Operation],
 ) -> None:
     """Compare two arrays using the appropriate identity model."""
-    path_key = ".".join(prop_path)
-    identity = array_keys.get(path_key, "$index")
+    identity = resolve_identity(prop_path, identity_keys)
 
-    if identity == "$index":
-        _diff_arrays_index(old, new, segments, prop_path, array_keys, exclude, reversible, operations)
-    elif identity == "$value":
+    if identity.mode == "$index":
+        _diff_arrays_index(old, new, segments, prop_path, identity_keys, exclude, exclude_paths, reversible, operations)
+    elif identity.mode == "$value":
         _diff_arrays_value(old, new, segments, reversible, operations)
     else:
-        _diff_arrays_keyed(old, new, segments, prop_path, array_keys, identity, exclude, reversible, operations)
+        _diff_arrays_keyed(
+            old, new, segments, prop_path, identity_keys, identity, exclude, exclude_paths, reversible, operations,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -161,8 +188,9 @@ def _diff_arrays_index(
     new: list[Any],
     segments: list[_Segment],
     prop_path: list[str],
-    array_keys: dict[str, str],
+    identity_keys: ArrayIdentityKeys,
     exclude: frozenset[str],
+    exclude_paths: frozenset[str],
     reversible: bool,
     operations: list[Operation],
 ) -> None:
@@ -173,7 +201,10 @@ def _diff_arrays_index(
     for i in range(min_len):
         seg = IndexSegment(index=i)
         child_segments = [*segments, seg]
-        _diff_values(old[i], new[i], child_segments, prop_path, array_keys, exclude, reversible, operations)
+        _diff_values(
+            old[i], new[i], child_segments, prop_path,
+            identity_keys, exclude, exclude_paths, reversible, operations,
+        )
 
     # Elements removed from the end (remove from highest index first)
     for i in range(len(old) - 1, min_len - 1, -1):
@@ -198,27 +229,28 @@ def _diff_arrays_keyed(
     new: list[Any],
     segments: list[_Segment],
     prop_path: list[str],
-    array_keys: dict[str, str],
-    identity_key: str,
+    identity_keys: ArrayIdentityKeys,
+    identity: _ResolvedIdentity,
     exclude: frozenset[str],
+    exclude_paths: frozenset[str],
     reversible: bool,
     operations: list[Operation],
 ) -> None:
     """Compare arrays by a key property on each element."""
-    old_by_key: dict[Any, dict[str, Any]] = {}
+    key_property = identity.key_property
+    assert key_property is not None  # guaranteed by resolve_identity for mode="key"
+    resolver = identity.resolver
+
+    old_by_key: dict[Any, Any] = {}
     for elem in old:
-        if not isinstance(elem, dict) or identity_key not in elem:
-            raise DiffError(f"Array element missing identity key '{identity_key}': {elem!r}")
-        key_val = elem[identity_key]
+        key_val = extract_identity(elem, key_property, resolver)
         hashable_key = _make_hashable(key_val)
         old_by_key[hashable_key] = elem
 
-    new_by_key: dict[Any, dict[str, Any]] = {}
+    new_by_key: dict[Any, Any] = {}
     new_key_order: list[Any] = []
     for elem in new:
-        if not isinstance(elem, dict) or identity_key not in elem:
-            raise DiffError(f"Array element missing identity key '{identity_key}': {elem!r}")
-        key_val = elem[identity_key]
+        key_val = extract_identity(elem, key_property, resolver)
         hashable_key = _make_hashable(key_val)
         new_by_key[hashable_key] = elem
         new_key_order.append(hashable_key)
@@ -226,8 +258,8 @@ def _diff_arrays_keyed(
     # Removed elements (in old but not in new)
     for hashable_key, old_elem in old_by_key.items():
         if hashable_key not in new_by_key:
-            key_val = old_elem[identity_key]
-            filter_seg = KeyFilterSegment(property=identity_key, value=key_val)
+            key_val = extract_identity(old_elem, key_property, resolver)
+            filter_seg = KeyFilterSegment(property=key_property, value=key_val)
             child_segments = [*segments, filter_seg]
             _emit_remove(old_elem, child_segments, reversible, operations)
 
@@ -237,19 +269,20 @@ def _diff_arrays_keyed(
             old_elem = old_by_key[hashable_key]
             new_elem = new_by_key[hashable_key]
             if not json_equal(old_elem, new_elem):
-                key_val = old_elem[identity_key]
-                filter_seg = KeyFilterSegment(property=identity_key, value=key_val)
+                key_val = extract_identity(old_elem, key_property, resolver)
+                filter_seg = KeyFilterSegment(property=key_property, value=key_val)
                 # Recurse into properties of the matched element
                 _diff_keyed_element(
-                    old_elem, new_elem, [*segments, filter_seg], prop_path, array_keys, exclude, reversible, operations
+                    old_elem, new_elem, [*segments, filter_seg], prop_path,
+                    identity_keys, exclude, exclude_paths, reversible, operations,
                 )
 
     # Added elements (in new but not in old)
     for hashable_key in new_key_order:
         if hashable_key not in old_by_key:
             new_elem = new_by_key[hashable_key]
-            key_val = new_elem[identity_key]
-            filter_seg = KeyFilterSegment(property=identity_key, value=key_val)
+            key_val = extract_identity(new_elem, key_property, resolver)
+            filter_seg = KeyFilterSegment(property=key_property, value=key_val)
             child_segments = [*segments, filter_seg]
             _emit_add(new_elem, child_segments, operations)
 
@@ -259,8 +292,9 @@ def _diff_keyed_element(
     new_elem: dict[str, Any],
     segments: list[_Segment],
     prop_path: list[str],
-    array_keys: dict[str, str],
+    identity_keys: ArrayIdentityKeys,
     exclude: frozenset[str],
+    exclude_paths: frozenset[str],
     reversible: bool,
     operations: list[Operation],
 ) -> None:
@@ -268,6 +302,9 @@ def _diff_keyed_element(
     all_keys = sorted((set(old_elem.keys()) | set(new_elem.keys())) - exclude)
 
     for key in all_keys:
+        if _should_exclude_path(prop_path, key, exclude_paths):
+            continue
+
         seg = PropertySegment(name=key)
         child_segments = [*segments, seg]
         child_prop_path = [*prop_path, key]
@@ -279,7 +316,7 @@ def _diff_keyed_element(
         else:
             _diff_values(
                 old_elem[key], new_elem[key], child_segments, child_prop_path,
-                array_keys, exclude, reversible, operations,
+                identity_keys, exclude, exclude_paths, reversible, operations,
             )
 
 
@@ -370,11 +407,18 @@ def _emit_remove(
 # ---------------------------------------------------------------------------
 
 
-def _make_hashable(value: Any) -> Any:
-    """Convert a JSON scalar value to something hashable for dict keys.
+def _should_exclude_path(prop_path: list[str], key: str, exclude_paths: frozenset[str]) -> bool:
+    """Check if a key at the current path should be excluded."""
+    if not exclude_paths:
+        return False
+    return ".".join([*prop_path, key]) in exclude_paths
 
-    JSON scalars (str, int, float, bool, None) are already hashable.
-    We wrap bool to avoid bool/int collision in dict keys.
+
+def _make_hashable(value: Any) -> Any:
+    """Make a JSON scalar safe for use as a dict key.
+
+    Python considers ``True == 1`` and ``False == 0``, so they collide
+    as dict keys.  We wrap bools in a tagged tuple to preserve identity.
     """
     if isinstance(value, bool):
         return ("__bool__", value)
