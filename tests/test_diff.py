@@ -726,36 +726,52 @@ class TestDuplicateIdentity:
 
 
 # ---------------------------------------------------------------------------
-# Value-based multiset semantics
+# Value-based duplicate detection
 # ---------------------------------------------------------------------------
 
 
-class TestValueMultiset:
-    def test_duplicate_value_add(self) -> None:
-        """Adding a duplicate value emits an add operation."""
+class TestValueDuplicates:
+    def test_duplicate_in_new_raises(self) -> None:
+        """$value identity rejects duplicates in new array."""
+        import pytest
+        from json_delta.errors import DiffError
+        with pytest.raises(DiffError, match="Duplicate value.*\\$value identity requires unique"):
+            diff_delta(
+                {"tags": ["a"]},
+                {"tags": ["a", "a"]},
+                array_identity_keys={"tags": "$value"},
+            )
+
+    def test_duplicate_in_old_raises(self) -> None:
+        """$value identity rejects duplicates in old array."""
+        import pytest
+        from json_delta.errors import DiffError
+        with pytest.raises(DiffError, match="Duplicate value.*\\$value identity requires unique"):
+            diff_delta(
+                {"tags": ["a", "a"]},
+                {"tags": ["a"]},
+                array_identity_keys={"tags": "$value"},
+            )
+
+    def test_duplicate_in_both_raises(self) -> None:
+        """$value identity rejects duplicates even when both sides differ."""
+        import pytest
+        from json_delta.errors import DiffError
+        with pytest.raises(DiffError, match="Duplicate value.*\\$value identity requires unique"):
+            diff_delta(
+                {"tags": ["a", "a", "b"]},
+                {"tags": ["a", "a", "c"]},
+                array_identity_keys={"tags": "$value"},
+            )
+
+    def test_unique_values_work(self) -> None:
+        """$value identity works correctly with unique values."""
         delta = diff_delta(
-            {"tags": ["a"]},
-            {"tags": ["a", "a"]},
+            {"tags": ["a", "b"]},
+            {"tags": ["a", "c"]},
             array_identity_keys={"tags": "$value"},
         )
         add_ops = [op for op in delta.operations if op.op == "add"]
-        assert len(add_ops) == 1
-
-    def test_duplicate_value_remove(self) -> None:
-        """Removing one of two duplicate values emits a remove operation."""
-        delta = diff_delta(
-            {"tags": ["a", "a"]},
-            {"tags": ["a"]},
-            array_identity_keys={"tags": "$value"},
-        )
         remove_ops = [op for op in delta.operations if op.op == "remove"]
+        assert len(add_ops) == 1
         assert len(remove_ops) == 1
-
-    def test_all_duplicates_unchanged(self) -> None:
-        """Identical duplicate arrays produce no operations."""
-        delta = diff_delta(
-            {"tags": ["a", "a"]},
-            {"tags": ["a", "a"]},
-            array_identity_keys={"tags": "$value"},
-        )
-        assert len(delta.operations) == 0

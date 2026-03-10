@@ -344,28 +344,31 @@ def _diff_arrays_value(
 ) -> None:
     """Compare arrays by element value (for primitive arrays).
 
-    Uses multiset semantics: each old value can only match one new value,
-    so duplicates are tracked correctly.
+    Value filters require each element to be unique — duplicate values
+    produce ambiguous paths that ``apply_delta`` cannot resolve.
+
+    Raises:
+        DiffError: If either array contains duplicate values.
     """
-    # Track which old elements have been matched
-    old_matched = [False] * len(old)
+    path_str = build_path(segments)
+    _check_value_duplicates(old, "old", path_str)
+    _check_value_duplicates(new, "new", path_str)
 
-    # Match new values against old values
-    for new_val in new:
-        match_idx = _find_unmatched(new_val, old, old_matched)
-        if match_idx is not None:
-            old_matched[match_idx] = True
-        else:
-            filter_seg = ValueFilterSegment(value=new_val)
-            child_segments = [*segments, filter_seg]
-            _emit_add(new_val, child_segments, operations)
-
-    # Unmatched old values are removed
-    for i, old_val in enumerate(old):
-        if not old_matched[i]:
+    # Find removed values (in old but not in new)
+    for old_val in old:
+        found = any(json_equal(old_val, new_val) for new_val in new)
+        if not found:
             filter_seg = ValueFilterSegment(value=old_val)
             child_segments = [*segments, filter_seg]
             _emit_remove(old_val, child_segments, reversible, operations)
+
+    # Find added values (in new but not in old)
+    for new_val in new:
+        found = any(json_equal(new_val, old_val) for old_val in old)
+        if not found:
+            filter_seg = ValueFilterSegment(value=new_val)
+            child_segments = [*segments, filter_seg]
+            _emit_add(new_val, child_segments, operations)
 
 
 # ---------------------------------------------------------------------------
@@ -417,19 +420,19 @@ def _emit_remove(
 # ---------------------------------------------------------------------------
 
 
-def _find_unmatched(
-    target: Any,
-    candidates: list[Any],
-    matched: list[bool],
-) -> int | None:
-    """Find the first unmatched candidate that equals *target*.
+def _check_value_duplicates(arr: list[Any], label: str, path_str: str) -> None:
+    """Raise DiffError if a $value array contains duplicate values.
 
-    Returns the index into *candidates*, or ``None`` if no match.
+    Value filters require each element to match exactly one position,
+    so duplicates make the resulting delta paths ambiguous.
     """
-    for i, candidate in enumerate(candidates):
-        if not matched[i] and json_equal(target, candidate):
-            return i
-    return None
+    for i, val_a in enumerate(arr):
+        for j in range(i + 1, len(arr)):
+            if json_equal(val_a, arr[j]):
+                raise DiffError(
+                    f"Duplicate value {val_a!r} in {label} array at {path_str}; "
+                    f"$value identity requires unique elements"
+                )
 
 
 def _should_exclude_path(prop_path: list[str], key: str, exclude_paths: frozenset[str]) -> bool:

@@ -168,11 +168,12 @@ new = {"items": [{"id": 1, "name": "Widget Pro"}, {"id": 2, "name": "Gadget"}]}
 delta = diff_delta(old, new, array_identity_keys={"items": "id"})
 # Path: $.items[?(@.id==1)].name — stable across reordering
 
-# Value-based: for primitive arrays
+# Value-based: for primitive arrays with unique values
 old_tags = {"tags": ["urgent", "draft"]}
 new_tags = {"tags": ["urgent", "review"]}
 delta = diff_delta(old_tags, new_tags, array_identity_keys={"tags": "$value"})
 # Paths: $.tags[?(@=='draft')] (remove), $.tags[?(@=='review')] (add)
+# Note: $value identity requires unique elements — duplicates raise DiffError
 
 # Index-based (default): track elements by position
 delta = diff_delta(old, new)
