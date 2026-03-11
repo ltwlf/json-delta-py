@@ -18,6 +18,7 @@ from json_delta._identity import (
 from json_delta._utils import json_equal, make_hashable, should_exclude_path, validate_json_value
 from json_delta.errors import DiffError
 from json_delta.models import (
+    _DELTA_SPEC_KEYS,
     Delta,
     IndexSegment,
     KeyFilterSegment,
@@ -458,4 +459,95 @@ def _check_value_duplicates(arr: list[Any], label: str, path_str: str) -> None:
                 f"$value identity requires unique elements"
             )
         seen.add(key)
+
+
+# ---------------------------------------------------------------------------
+# Delta squash (state compaction)
+# ---------------------------------------------------------------------------
+
+
+def squash_deltas(
+    source: Any,
+    *deltas: Delta,
+    target: Any | None = None,
+    array_identity_keys: ArrayIdentityKeys | None = None,
+    exclude_keys: set[str] | None = None,
+    exclude_paths: set[str] | None = None,
+    reversible: bool = True,
+    verify_target: bool = True,
+) -> Delta:
+    """Compute the net-effect delta of applying all deltas sequentially.
+
+    This is **state compaction**, not history-preserving merge — intermediate
+    operation metadata (extensions, granularity, ordering) is lost.  The
+    result is equivalent to ``diff_delta(source, final_state)``.
+
+    Args:
+        source: The original document (before any deltas).
+        *deltas: Ordered sequence of deltas to squash.
+        target: Optional pre-computed final state.  When provided without
+            *deltas*, performs a direct ``diff_delta(source, target)``.
+            When provided **with** *deltas*, *verify_target* controls
+            whether the library checks consistency.
+        array_identity_keys: Identity key mapping (same as :func:`diff_delta`).
+        exclude_keys: Property names to skip (same as :func:`diff_delta`).
+        exclude_paths: Dotted paths to skip (same as :func:`diff_delta`).
+        reversible: Include ``oldValue`` on replace/remove (default ``True``).
+        verify_target: When ``True`` (the default) and both *deltas* and
+            *target* are provided, verify that sequential application
+            matches *target*.  Set to ``False`` to skip verification when
+            you are confident in the target and want to avoid the O(n)
+            apply cost.
+
+    Returns:
+        A single :class:`Delta` representing the net effect, with envelope
+        extensions merged from all input deltas (last-wins on conflict).
+
+    Raises:
+        DiffError: If *verify_target* is ``True`` and the computed final
+            state does not match the provided *target*.
+    """
+    import copy
+
+    from json_delta.apply import apply_delta
+
+    # Determine the final state
+    if target is not None and not deltas:
+        # Direct compaction: source → target
+        final = target
+    elif target is not None and deltas:
+        if verify_target:
+            computed = copy.deepcopy(source)
+            for d in deltas:
+                computed = apply_delta(computed, d)
+            if not json_equal(computed, target):
+                raise DiffError(
+                    "squash_deltas: provided target does not match sequential "
+                    "application of deltas to source"
+                )
+        final = target
+    else:
+        # Compute final by applying all deltas
+        final = copy.deepcopy(source)
+        for d in deltas:
+            final = apply_delta(final, d)
+
+    # Compute the net-effect delta
+    result = diff_delta(
+        source,
+        final,
+        array_identity_keys=array_identity_keys,
+        exclude_keys=exclude_keys,
+        exclude_paths=exclude_paths,
+        reversible=reversible,
+    )
+
+    # Merge envelope extensions from input deltas (last-wins)
+    for d in deltas:
+        if isinstance(d, dict):
+            for key, value in d.items():
+                if key not in _DELTA_SPEC_KEYS:
+                    result[key] = value
+
+    return result
 

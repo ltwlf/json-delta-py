@@ -7,7 +7,7 @@ key-based, index-based, and value-based array identity models.
 from json_delta._identity import IdentityResolver
 from json_delta.apply import apply_delta
 from json_delta.compare import compare
-from json_delta.diff import diff_delta
+from json_delta.diff import diff_delta, squash_deltas
 from json_delta.errors import (
     ApplyError,
     DiffError,
@@ -65,6 +65,7 @@ __all__ = [
     "parse_path",
     "resolve_path",
     "revert_delta",
+    "squash_deltas",
     "to_json_patch",
     "validate_delta",
 ]

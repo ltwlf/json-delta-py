@@ -249,6 +249,48 @@ tree = compare(
 # tree.value["role"].type == ChangeType.REPLACED  (.value="admin", .old_value="viewer")
 # tree.value["email"].type == ChangeType.REMOVED  (.old_value="a@example.com")
 # tree.value["team"].type == ChangeType.ADDED     (.value="eng")
+
+# Serialize for JSON APIs or rendering
+tree.to_dict()       # recursive dict with "type", "value", "old_value"
+tree.to_flat_list()  # [{"path": "$.role", "type": "replaced", "value": "admin", "old_value": "viewer"}, ...]
+# Note: flat list paths are display positions, not addressable locators.
+# For keyed arrays, use diff_delta() paths to get stable filter expressions.
+```
+
+### Delta Workflow Helpers
+
+Transform, stamp, group, and compact deltas for event-sourcing and sync workflows:
+
+```python
+import copy
+from json_delta import diff_delta, apply_delta, squash_deltas, Delta, Operation
+
+source = {"user": {"name": "Alice", "role": "viewer"}}
+
+# Compute two successive deltas
+d1 = diff_delta(source, {"user": {"name": "Alice", "role": "editor"}})
+mid = apply_delta(copy.deepcopy(source), d1)
+d2 = diff_delta(mid, {"user": {"name": "Alice", "role": "admin"}})
+
+# Squash into a single net-effect delta (state compaction)
+squashed = squash_deltas(source, d1, d2)
+# squashed == diff_delta(source, {"user": {"name": "Alice", "role": "admin"}})
+
+# Stamp metadata on every operation
+tagged = squashed.stamp(x_actor="system", x_batch="migration-1")
+tagged.operations[0].x_actor  # "system"
+
+# Transform operations
+compact = squashed.map(lambda op: Operation({k: v for k, v in op.items() if k != "oldValue"}))
+
+# Group by top-level property
+groups = squashed.group_by(
+    lambda op: op.segments[0].name if op.segments else "$"
+)
+
+# Strip extensions for API responses
+squashed.spec_dict()             # spec-only envelope + operations
+squashed.operations[0].spec_dict()  # spec-only operation
 ```
 
 ## API Reference
@@ -267,6 +309,7 @@ tree = compare(
 | `describe_path(path)` | Human-readable description (`"$.user.name"` → `"user > name"`) |
 | `resolve_path(path, document)` | Resolve filter path to RFC 6901 JSON Pointer |
 | `compare(old, new, *, array_identity_keys=None, exclude_keys=None, exclude_paths=None)` | Enriched comparison tree for visual diff rendering |
+| `squash_deltas(source, *deltas, *, target=None, array_identity_keys=None, exclude_keys=None, exclude_paths=None, reversible=True, verify_target=True)` | Compact multiple deltas into a single net-effect delta (verifies target by default) |
 | `to_json_patch(delta, document)` | Convert delta to RFC 6902 JSON Patch |
 | `from_json_patch(patch)` | Create delta from RFC 6902 JSON Patch |
 
@@ -278,6 +321,17 @@ tree = compare(
 | `Operation.replace(path, value, *, old_value=None, **ext)` | Create a `replace` operation |
 | `Operation.remove(path, *, old_value=None, **ext)` | Create a `remove` operation |
 
+### Operation Properties
+
+| Property / Method | Description |
+| --- | --- |
+| `op.segments` | Parsed path segments (cached) |
+| `op.filter_values` | Identity filter values from path (cached) |
+| `op.leaf_property` | Terminal property name, or `None` for whole-element/root ops (cached) |
+| `op.extensions` | All non-spec extension properties |
+| `op.spec_dict()` | Spec-only fields (`op`, `path`, `value`, `oldValue`) |
+| `op.describe()` | Human-readable path description |
+
 ### Delta Factories
 
 | Factory | Description |
@@ -285,6 +339,26 @@ tree = compare(
 | `Delta.create(*operations, **ext)` | Create a delta with standard envelope |
 | `Delta.from_dict(d)` | Create from raw dict with validation |
 | `Delta.from_json_patch(patch)` | Create from RFC 6902 JSON Patch |
+| `Delta.squash(source, *deltas, *, target=None, ...)` | Compact deltas into net-effect (classmethod) |
+
+### Delta Methods
+
+| Method | Description |
+| --- | --- |
+| `delta.filter(predicate)` | New delta with matching operations |
+| `delta.map(fn)` | New delta with transformed operations |
+| `delta.stamp(**extensions)` | New delta with extensions set on every operation |
+| `delta.group_by(key_fn)` | Dict of sub-deltas grouped by key function |
+| `delta.spec_dict()` | Spec-only envelope and operations (strips extensions) |
+| `delta.extensions` | All non-spec envelope extension properties |
+| `delta.summary(document=None)` | Human-readable multi-line summary |
+
+### ComparisonNode Serialization
+
+| Method | Description |
+| --- | --- |
+| `node.to_dict()` | Recursive JSON-serializable dict (type-driven null handling) |
+| `node.to_flat_list(*, include_unchanged=False)` | Flat list of leaf changes with display paths (not addressable locators) |
 
 ### Types
 

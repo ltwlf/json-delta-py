@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
 from functools import cached_property
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+# Matches simple identifiers safe for dot-notation display paths.
+# Consistent with path.py _PROPERTY_NAME_RE (spec Section 5.5).
+_IDENT_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+if TYPE_CHECKING:
+    from json_delta._identity import ArrayIdentityKeys
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +110,92 @@ class ComparisonNode:
     value: Any = None
     old_value: Any | None = None
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize this node to a plain dict for JSON serialization.
+
+        For ``CONTAINER`` nodes, ``value`` is recursively serialized.
+        For leaf nodes, ``value`` and ``old_value`` are included based
+        on the change type (not truthiness — ``None``/``null`` is a
+        valid JSON value).
+
+        Returns:
+            A JSON-serializable dict with ``type`` as a string.
+        """
+        result: dict[str, Any] = {"type": self.type.value}
+        if self.type == ChangeType.CONTAINER:
+            if isinstance(self.value, dict):
+                result["value"] = {k: v.to_dict() for k, v in self.value.items()}
+            elif isinstance(self.value, list):
+                result["value"] = [v.to_dict() for v in self.value]
+        else:
+            if self.type in (ChangeType.UNCHANGED, ChangeType.ADDED, ChangeType.REPLACED):
+                result["value"] = self.value
+            if self.type in (ChangeType.REMOVED, ChangeType.REPLACED):
+                result["old_value"] = self.old_value
+        return result
+
+    def to_flat_list(
+        self,
+        *,
+        prefix: str = "$",
+        include_unchanged: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Flatten this tree into a list of leaf changes with paths.
+
+        Each entry contains ``path``, ``type``, and optionally ``value``
+        and ``old_value`` based on the change type.
+
+        .. warning::
+
+            For keyed-array comparison trees, paths use structural display
+            positions (e.g., ``$.items[0]``), **not** stable identity-based
+            locators.  Do not use these paths to address elements in a
+            document — use :func:`diff_delta` for addressable filter paths.
+
+        Args:
+            prefix: The path prefix for this node (default ``"$"``).
+            include_unchanged: If ``True``, include ``UNCHANGED`` leaves.
+                Defaults to ``False`` (only changed leaves).
+
+        Returns:
+            A list of dicts, one per leaf node.
+        """
+        results: list[dict[str, Any]] = []
+        self._flatten(prefix, include_unchanged, results)
+        return results
+
+    def _flatten(
+        self,
+        path: str,
+        include_unchanged: bool,
+        results: list[dict[str, Any]],
+    ) -> None:
+        """Recursively flatten the comparison tree into *results*."""
+        if self.type == ChangeType.CONTAINER:
+            if isinstance(self.value, dict):
+                for key, child in self.value.items():
+                    if _IDENT_RE.match(key):
+                        child_path = f"{path}.{key}"
+                    else:
+                        escaped = key.replace("'", "''")
+                        child_path = f"{path}['{escaped}']"
+                    child._flatten(child_path, include_unchanged, results)
+            elif isinstance(self.value, list):
+                for i, child in enumerate(self.value):
+                    child_path = f"{path}[{i}]"
+                    child._flatten(child_path, include_unchanged, results)
+            return
+
+        if self.type == ChangeType.UNCHANGED and not include_unchanged:
+            return
+
+        entry: dict[str, Any] = {"path": path, "type": self.type.value}
+        if self.type in (ChangeType.UNCHANGED, ChangeType.ADDED, ChangeType.REPLACED):
+            entry["value"] = self.value
+        if self.type in (ChangeType.REMOVED, ChangeType.REPLACED):
+            entry["old_value"] = self.old_value
+        results.append(entry)
+
 
 # ---------------------------------------------------------------------------
 # Delta and Operation types
@@ -196,9 +290,10 @@ class Operation(dict[str, Any]):
         return self.get("oldValue")
 
     def _invalidate_path_cache(self) -> None:
-        """Drop cached ``segments`` and ``filter_values`` so they are re-parsed on next access."""
+        """Drop cached ``segments``, ``filter_values``, and ``leaf_property`` so they are re-parsed."""
         self.__dict__.pop("segments", None)
         self.__dict__.pop("filter_values", None)
+        self.__dict__.pop("leaf_property", None)
 
     @cached_property
     def segments(
@@ -278,6 +373,32 @@ class Operation(dict[str, Any]):
         The ``x_`` prefix is recommended for future-safety but not enforced.
         """
         return {k: v for k, v in self.items() if k not in _OP_SPEC_KEYS}
+
+    def spec_dict(self) -> dict[str, Any]:
+        """Spec-only fields (``op``, ``path``, ``value``, ``oldValue``).
+
+        Complement of :attr:`extensions` — together they partition all keys.
+        Useful for stripping extension metadata before serialization.
+        """
+        return {k: v for k, v in self.items() if k in _OP_SPEC_KEYS}
+
+    @cached_property
+    def leaf_property(self) -> str | None:
+        """Name of the terminal property, or ``None`` for whole-element/root ops.
+
+        Example::
+
+            Operation(op="replace", path="$.items[?(@.id=='1')].title", value="x").leaf_property
+            # "title"
+            Operation(op="remove", path="$.items[?(@.id=='1')]", value=None).leaf_property
+            # None
+            Operation(op="replace", path="$", value={}).leaf_property
+            # None
+        """
+        segs = self.segments
+        if segs and isinstance(segs[-1], PropertySegment):
+            return segs[-1].name
+        return None
 
     def __getattr__(self, name: str) -> Any:
         """Fall back to dict lookup for extension attribute access."""
@@ -510,7 +631,7 @@ class Delta(dict[str, Any]):
         merged["operations"] = [*self.operations, *other.operations]
         return Delta(merged)
 
-    # -- Filtering -----------------------------------------------------------
+    # -- Filtering and transformation ----------------------------------------
 
     def filter(self, predicate: Callable[[Operation], bool]) -> Delta:
         """Return a new delta with only operations matching the predicate.
@@ -526,6 +647,59 @@ class Delta(dict[str, Any]):
         result: dict[str, Any] = {k: v for k, v in self.items() if k != "operations"}
         result["operations"] = filtered_ops
         return Delta(result)
+
+    def map(self, fn: Callable[[Operation], Operation | dict[str, Any]]) -> Delta:
+        """Return a new delta with each operation transformed by *fn*.
+
+        Preserves all envelope-level properties. The function receives an
+        :class:`Operation` and should return an ``Operation`` or raw ``dict``
+        (which will be auto-wrapped).
+
+        Example::
+
+            # Strip oldValue for compact sync payloads
+            compact = delta.map(lambda op: Operation(
+                {k: v for k, v in op.items() if k != "oldValue"}
+            ))
+        """
+        mapped_ops = [fn(op) for op in self.operations]
+        result: dict[str, Any] = {k: v for k, v in self.items() if k != "operations"}
+        result["operations"] = mapped_ops
+        return Delta(result)
+
+    def stamp(self, **extensions: Any) -> Delta:
+        """Return a new delta with *extensions* set on every operation.
+
+        Immutable — returns a new delta; the original is not modified.
+        Preserves ``Operation`` subclasses where the subclass constructor
+        accepts a dict.
+
+        Example::
+
+            tagged = delta.stamp(x_batch_id=batch_id, x_timestamp=now)
+        """
+        return self.map(lambda op: type(op)({**op, **extensions}))
+
+    def group_by(self, key: Callable[[Operation], str]) -> dict[str, Delta]:
+        """Group operations by a key function, returning a dict of sub-deltas.
+
+        Each sub-delta preserves envelope-level properties.
+
+        Example::
+
+            # Group by top-level property (segments[0] — parse_path omits RootSegment)
+            groups = delta.group_by(
+                lambda op: op.segments[0].name
+                if op.segments and isinstance(op.segments[0], PropertySegment)
+                else "$"
+            )
+        """
+        groups: dict[str, list[Operation]] = {}
+        for op in self.operations:
+            k = key(op)
+            groups.setdefault(k, []).append(op)
+        envelope = {k: v for k, v in self.items() if k != "operations"}
+        return {k: Delta({**envelope, "operations": ops}) for k, ops in groups.items()}
 
     def summary(self, document: Any = None) -> str:
         """Human-readable summary of all operations.
@@ -620,6 +794,48 @@ class Delta(dict[str, Any]):
         The ``x_`` prefix is recommended for future-safety but not enforced.
         """
         return {k: v for k, v in self.items() if k not in _DELTA_SPEC_KEYS}
+
+    def spec_dict(self) -> dict[str, Any]:
+        """Spec-only envelope with spec-only operations.
+
+        Complement of :attr:`extensions` — strips all non-spec keys from both
+        the envelope and each operation.
+        """
+        result = {k: v for k, v in self.items() if k in _DELTA_SPEC_KEYS}
+        result["operations"] = [op.spec_dict() for op in self.operations]
+        return result
+
+    @classmethod
+    def squash(
+        cls,
+        source: Any,
+        *deltas: Delta,
+        target: Any | None = None,
+        array_identity_keys: ArrayIdentityKeys | None = None,
+        exclude_keys: set[str] | None = None,
+        exclude_paths: set[str] | None = None,
+        reversible: bool = True,
+        verify_target: bool = True,
+    ) -> Delta:
+        """Compute the net-effect delta of applying all deltas sequentially.
+
+        This is state compaction, not history-preserving merge — intermediate
+        operation metadata (extensions, granularity, ordering) is lost.
+
+        Delegates to :func:`json_delta.diff.squash_deltas`.
+        """
+        from json_delta.diff import squash_deltas
+
+        return squash_deltas(
+            source,
+            *deltas,
+            target=target,
+            array_identity_keys=array_identity_keys,
+            exclude_keys=exclude_keys,
+            exclude_paths=exclude_paths,
+            reversible=reversible,
+            verify_target=verify_target,
+        )
 
     def __getattr__(self, name: str) -> Any:
         """Fall back to dict lookup for extension attribute access."""

@@ -811,3 +811,225 @@ class TestDelta:
         inv = invert_delta(delta)
         assert isinstance(inv, Delta)
         assert isinstance(inv.operations[0], Operation)
+
+
+# ---------------------------------------------------------------------------
+# Operation.spec_dict()
+# ---------------------------------------------------------------------------
+
+
+class TestOperationSpecDict:
+    def test_returns_only_spec_keys(self) -> None:
+        op = Operation(op="replace", path="$.x", value=2, oldValue=1, x_editor="admin")
+        assert op.spec_dict() == {"op": "replace", "path": "$.x", "value": 2, "oldValue": 1}
+
+    def test_empty_extensions(self) -> None:
+        op = Operation(op="add", path="$.x", value=1)
+        assert op.spec_dict() == {"op": "add", "path": "$.x", "value": 1}
+
+    def test_partitions_all_keys(self) -> None:
+        op = Operation(op="replace", path="$.x", value=2, oldValue=1, x_a="a", x_b="b")
+        spec_keys = set(op.spec_dict().keys())
+        ext_keys = set(op.extensions.keys())
+        all_keys = set(op.keys())
+        assert spec_keys | ext_keys == all_keys
+        assert spec_keys & ext_keys == set()
+
+    def test_remove_without_old_value(self) -> None:
+        op = Operation(op="remove", path="$.x")
+        assert op.spec_dict() == {"op": "remove", "path": "$.x"}
+
+
+# ---------------------------------------------------------------------------
+# Operation.leaf_property
+# ---------------------------------------------------------------------------
+
+
+class TestOperationLeafProperty:
+    def test_property_segment(self) -> None:
+        op = Operation(op="replace", path="$.items[?(@.id=='1')].title", value="x")
+        assert op.leaf_property == "title"
+
+    def test_filter_segment_returns_none(self) -> None:
+        op = Operation(op="remove", path="$.items[?(@.id=='1')]")
+        assert op.leaf_property is None
+
+    def test_root_returns_none(self) -> None:
+        op = Operation(op="replace", path="$", value={})
+        assert op.leaf_property is None
+
+    def test_simple_property(self) -> None:
+        op = Operation(op="replace", path="$.user.name", value="Bob")
+        assert op.leaf_property == "name"
+
+    def test_index_segment_returns_none(self) -> None:
+        op = Operation(op="replace", path="$.items[0]", value="x")
+        assert op.leaf_property is None
+
+    def test_cached(self) -> None:
+        op = Operation(op="replace", path="$.user.name", value="Bob")
+        assert op.leaf_property is op.leaf_property
+
+    def test_cache_invalidated_on_path_change(self) -> None:
+        op = Operation(op="replace", path="$.user.name", value="Bob")
+        assert op.leaf_property == "name"
+        op["path"] = "$.user.email"
+        assert op.leaf_property == "email"
+
+
+# ---------------------------------------------------------------------------
+# Delta.spec_dict()
+# ---------------------------------------------------------------------------
+
+
+class TestDeltaSpecDict:
+    def test_strips_envelope_and_operation_extensions(self) -> None:
+        delta = Delta.create(
+            Operation.add("$.x", 1, x_editor="admin"),
+            x_agent="test",
+        )
+        spec = delta.spec_dict()
+        assert set(spec.keys()) == {"format", "version", "operations"}
+        assert "x_agent" not in spec
+        assert "x_editor" not in spec["operations"][0]
+
+    def test_preserves_spec_keys(self) -> None:
+        delta = Delta.create(
+            Operation.replace("$.x", 2, old_value=1),
+        )
+        spec = delta.spec_dict()
+        assert spec["operations"][0] == {"op": "replace", "path": "$.x", "value": 2, "oldValue": 1}
+
+    def test_partitions_all_keys(self) -> None:
+        delta = Delta.create(x_meta="info")
+        spec_keys = set(delta.spec_dict().keys())
+        ext_keys = set(delta.extensions.keys())
+        all_keys = set(delta.keys())
+        assert spec_keys | ext_keys == all_keys
+        assert spec_keys & ext_keys == set()
+
+
+# ---------------------------------------------------------------------------
+# Delta.map()
+# ---------------------------------------------------------------------------
+
+
+class TestDeltaMap:
+    def test_transform_operations(self) -> None:
+        delta = Delta.create(
+            Operation.replace("$.x", 2, old_value=1),
+            Operation.replace("$.y", 4, old_value=3),
+        )
+        # Strip oldValue
+        compact = delta.map(lambda op: Operation({k: v for k, v in op.items() if k != "oldValue"}))
+        assert "oldValue" not in compact.operations[0]
+        assert "oldValue" not in compact.operations[1]
+
+    def test_preserves_envelope(self) -> None:
+        delta = Delta.create(Operation.add("$.x", 1), x_agent="test")
+        mapped = delta.map(lambda op: op)
+        assert mapped["x_agent"] == "test"
+        assert mapped.format == "json-delta"
+
+    def test_returns_new_delta(self) -> None:
+        delta = Delta.create(Operation.add("$.x", 1))
+        mapped = delta.map(lambda op: Operation({**op, "x_ts": "now"}))
+        assert "x_ts" in mapped.operations[0]
+        assert "x_ts" not in delta.operations[0]
+
+    def test_raw_dict_auto_wrapped(self) -> None:
+        delta = Delta.create(Operation.add("$.x", 1))
+        mapped = delta.map(lambda op: {"op": "add", "path": "$.y", "value": 2})
+        assert isinstance(mapped.operations[0], Operation)
+        assert mapped.operations[0].path == "$.y"
+
+
+# ---------------------------------------------------------------------------
+# Delta.stamp()
+# ---------------------------------------------------------------------------
+
+
+class TestDeltaStamp:
+    def test_sets_extensions_on_all_ops(self) -> None:
+        delta = Delta.create(
+            Operation.add("$.x", 1),
+            Operation.replace("$.y", 2),
+        )
+        stamped = delta.stamp(x_batch="b1", x_ts="now")
+        for op in stamped:
+            assert op["x_batch"] == "b1"
+            assert op["x_ts"] == "now"
+
+    def test_immutable(self) -> None:
+        delta = Delta.create(Operation.add("$.x", 1))
+        stamped = delta.stamp(x_ts="now")
+        assert "x_ts" not in delta.operations[0]
+        assert "x_ts" in stamped.operations[0]
+
+    def test_preserves_subclass(self) -> None:
+        class AuditOp(Operation):
+            pass
+
+        op = AuditOp(op="add", path="$.x", value=1)
+        delta = Delta({"format": "json-delta", "version": 1, "operations": [op]})
+        stamped = delta.stamp(x_ts="now")
+        assert type(stamped.operations[0]) is AuditOp
+
+    def test_preserves_envelope(self) -> None:
+        delta = Delta.create(Operation.add("$.x", 1), x_agent="test")
+        stamped = delta.stamp(x_ts="now")
+        assert stamped["x_agent"] == "test"
+
+
+# ---------------------------------------------------------------------------
+# Delta.group_by()
+# ---------------------------------------------------------------------------
+
+
+class TestDeltaGroupBy:
+    def test_group_by_op_type(self) -> None:
+        delta = Delta.create(
+            Operation.add("$.a", 1),
+            Operation.replace("$.b", 2),
+            Operation.add("$.c", 3),
+            Operation.remove("$.d"),
+        )
+        groups = delta.group_by(lambda op: op.op)
+        assert len(groups["add"]) == 2
+        assert len(groups["replace"]) == 1
+        assert len(groups["remove"]) == 1
+
+    def test_preserves_envelope(self) -> None:
+        delta = Delta.create(
+            Operation.add("$.x", 1),
+            Operation.add("$.y", 2),
+            x_agent="test",
+        )
+        groups = delta.group_by(lambda op: op.path)
+        for sub_delta in groups.values():
+            assert sub_delta["x_agent"] == "test"
+            assert sub_delta.format == "json-delta"
+
+    def test_single_group(self) -> None:
+        delta = Delta.create(
+            Operation.add("$.x", 1),
+            Operation.add("$.y", 2),
+        )
+        groups = delta.group_by(lambda op: "all")
+        assert len(groups) == 1
+        assert len(groups["all"]) == 2
+
+    def test_empty_delta(self) -> None:
+        delta = Delta.create()
+        groups = delta.group_by(lambda op: op.op)
+        assert groups == {}
+
+    def test_group_by_filter_values(self) -> None:
+        delta = Delta.create(
+            Operation.replace("$.items[?(@.id=='u1')].name", "Alice"),
+            Operation.replace("$.items[?(@.id=='u1')].email", "alice@x.com"),
+            Operation.replace("$.items[?(@.id=='u2')].name", "Bob"),
+        )
+        groups = delta.group_by(lambda op: str(op.filter_values.get("items", "other")))
+        assert len(groups["u1"]) == 2
+        assert len(groups["u2"]) == 1
